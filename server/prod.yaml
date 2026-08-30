@@ -12,7 +12,7 @@ buffer:
 realtime_vc:
   device: ["cuda:0"]
   is_debug: false
-  reference_wav_path: "server/resources/refs/ref-arabic-saudi-24k.wav"
+  reference_wav_path: "resources/refs/ref-arabic-saudi-24k.wav"
   save_dir: "outputs/"
   save_input: false
   save_output: false
