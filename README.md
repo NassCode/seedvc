@@ -11,3 +11,8 @@ The first milestone intentionally keeps one active reference voice on the server
 See [windows-client/README.md](windows-client/README.md) for local Windows audio
 setup and testing. See [server/README.md](server/README.md) for the pinned
 Fast-VC-Service RunPod deployment and secure first-test workflow.
+
+For normal use, run `windows-client/setup-gui.bat` once and then launch
+`windows-client/run-gui.bat`. The desktop controller manages audio devices,
+Fast-VC startup, the SSH tunnel, the Windows stream, and optional RunPod
+start/stop automation.

@@ -174,6 +174,7 @@ class ProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 output_sample_rate=48_000,
                 chunk_ms=20,
                 connect_timeout=2.0,
+                control_stdin=False,
             )
             patches = [
                 mock.patch.object(client.sd, "query_devices", side_effect=lambda i: DEVICES[i]),

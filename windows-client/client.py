@@ -386,6 +386,7 @@ async def run_remote(
     status(f"connecting to {args.url}")
 
     tasks: set[asyncio.Task] = set()
+    received_audio = False
     try:
         async with websockets.connect(
             args.url,
@@ -410,6 +411,7 @@ async def run_remote(
                     await websocket.send(payload)
 
             async def receiver() -> None:
+                nonlocal received_audio
                 while not stop_event.is_set():
                     message = await websocket.recv()
                     if isinstance(message, bytes):
@@ -418,6 +420,9 @@ async def run_remote(
                                 f"server returned an odd-sized PCM frame ({len(message)} bytes)"
                             )
                         recv_chunks.put(np.frombuffer(message, dtype="<i2").copy())
+                        if not received_audio:
+                            received_audio = True
+                            status("receiving converted audio")
                         continue
                     try:
                         data = json.loads(message)
@@ -445,6 +450,15 @@ async def run_remote(
                         continue
                     warning(message)
 
+            async def control_stdin() -> None:
+                """Allow a parent GUI to request a protocol-clean shutdown."""
+                while not stop_event.is_set():
+                    command = await asyncio.to_thread(sys.stdin.readline)
+                    if not command or command.strip().casefold() in {"stop", "quit", "exit"}:
+                        status("stop requested by controller")
+                        stop_event.set()
+                        return
+
             try:
                 with sd.InputStream(
                     device=input_device,
@@ -469,6 +483,8 @@ async def run_remote(
                         asyncio.create_task(receiver(), name="receiver"),
                         asyncio.create_task(report_callback_status(), name="audio-status"),
                     }
+                    if args.control_stdin:
+                        tasks.add(asyncio.create_task(control_stdin(), name="controller"))
                     done, pending = await asyncio.wait(
                         tasks, return_when=asyncio.FIRST_EXCEPTION
                     )
@@ -557,6 +573,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="local-test duration in seconds (default: until Ctrl+C)",
     )
     parser.add_argument("--connect-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--control-stdin",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args(argv)
     if args.duration is not None and args.duration <= 0:
         parser.error("--duration must be greater than zero")

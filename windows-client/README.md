@@ -5,6 +5,31 @@ Windows device at its native rate, resamples microphone audio to the server's
 16 kHz input rate, and asks the server to return audio at the selected output
 device's native rate.
 
+## Desktop controller (recommended)
+
+Run `setup-gui.bat` once, then double-click `run-gui.bat`. The controller:
+
+- enumerates input/output devices and prefers Windows WASAPI;
+- starts or verifies Fast-VC-Service through SSH;
+- creates the private SSH tunnel;
+- starts and stops the tested audio client cleanly;
+- shows pod, server, tunnel, and voice status with a live activity log; and
+- can start, discover, and stop an existing RunPod Pod through the RunPod API.
+
+For automatic Pod management, enter the Pod ID and a restricted RunPod API key,
+then enable **Start and discover the pod through the RunPod API**. The key is
+stored by Windows Credential Manager and is never written to the repository or
+the GUI settings file. RunPod's current REST endpoints are documented under
+[Manage Pods](https://docs.runpod.io/pods/manage-pods) and
+[Pod API](https://docs.runpod.io/api-reference/pods/GET/pods/podId).
+
+The SSH host and port fields support a manual mode when API automation is not
+enabled. In both modes, select `CABLE Input` as the GUI playback device and
+`CABLE Output` as the microphone in the calling app.
+
+The sections below document the underlying command-line workflow and remain
+useful for diagnostics.
+
 ## 1. Install VB-CABLE
 
 Install VB-CABLE and reboot Windows if prompted. The playback device normally appears as `CABLE Input`; calling apps can then use `CABLE Output` as their microphone.
