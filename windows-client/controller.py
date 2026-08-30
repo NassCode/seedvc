@@ -152,6 +152,9 @@ class RunPodAPI:
     def stop_pod(self, pod_id: str) -> dict:
         return self._request("POST", f"/pods/{pod_id}/stop")
 
+    def restart_pod(self, pod_id: str) -> dict:
+        return self._request("POST", f"/pods/{pod_id}/restart")
+
     def wait_for_ssh(
         self,
         pod_id: str,
@@ -164,14 +167,24 @@ class RunPodAPI:
         while time.monotonic() < deadline:
             pod = self.get_pod(pod_id)
             last_status = str(pod.get("desiredStatus") or pod.get("status") or "starting")
-            if progress:
-                progress(f"RunPod status: {last_status}")
             connection = pod_connection(pod)
-            if connection:
+            if connection and tcp_open(connection.host, connection.ssh_port, timeout=1.0):
+                if progress:
+                    progress(
+                        f"SSH is ready at {connection.host}:{connection.ssh_port}"
+                    )
                 return connection
+            if progress:
+                detail = "waiting for an SSH address"
+                if connection:
+                    detail = (
+                        f"waiting for SSH at {connection.host}:"
+                        f"{connection.ssh_port}"
+                    )
+                progress(f"RunPod status: {last_status}; {detail}")
             time.sleep(interval)
         raise ControllerError(
-            f"pod did not publish an SSH address within {timeout:g} seconds "
+            f"pod SSH did not become reachable within {timeout:g} seconds "
             f"(last status: {last_status})"
         )
 

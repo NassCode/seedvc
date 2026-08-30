@@ -39,6 +39,21 @@ class PodTests(unittest.TestCase):
     def test_pod_connection_returns_none_while_starting(self):
         self.assertIsNone(controller.pod_connection({"portMappings": {}}))
 
+    @mock.patch("controller.tcp_open", side_effect=(False, True))
+    def test_wait_for_ssh_requires_reachable_port_and_tracks_remapping(self, tcp_open):
+        api = controller.RunPodAPI("secret", base_url="https://example.test")
+        api.get_pod = mock.Mock(
+            side_effect=(
+                {"status": "RUNNING", "publicIp": "203.0.113.1", "portMappings": {"22": 18122}},
+                {"status": "RUNNING", "publicIp": "203.0.113.2", "portMappings": {"22": 18123}},
+            )
+        )
+
+        result = api.wait_for_ssh("pod123", timeout=1, interval=0)
+
+        self.assertEqual(result, controller.PodConnection("203.0.113.2", 18123))
+        self.assertEqual(tcp_open.call_count, 2)
+
     @mock.patch("controller.request.urlopen")
     def test_runpod_api_uses_bearer_auth(self, urlopen):
         response = mock.MagicMock()
@@ -52,6 +67,14 @@ class PodTests(unittest.TestCase):
         self.assertEqual(req.full_url, "https://example.test/pods/pod123/start")
         self.assertEqual(req.method, "POST")
         self.assertEqual(req.headers["Authorization"], "Bearer secret")
+
+    @mock.patch.object(controller.RunPodAPI, "_request", return_value={})
+    def test_restart_pod_uses_restart_endpoint(self, request):
+        api = controller.RunPodAPI("secret", base_url="https://example.test")
+
+        api.restart_pod("pod123")
+
+        request.assert_called_once_with("POST", "/pods/pod123/restart")
 
 
 class SSHCommandTests(unittest.TestCase):

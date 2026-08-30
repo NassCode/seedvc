@@ -344,12 +344,28 @@ class SeedVCApp:
                 self._event("status", ("pod", "Starting", "busy"))
                 self._event("log", ("Starting or resuming the RunPod pod…", "info"))
                 api.start_pod(settings.pod_id)
+            else:
+                self._event(
+                    "log",
+                    ("RunPod is online; waiting for SSH to accept connections…", "info"),
+                )
+            try:
+                connection = api.wait_for_ssh(
+                    settings.pod_id,
+                    timeout=60 if connection is not None else 300,
+                    progress=lambda line: self._event("log", (line, "info")),
+                )
+            except ControllerError:
+                self._event(
+                    "log",
+                    ("SSH stayed unavailable; restarting the pod once…", "warning"),
+                )
+                self._event("status", ("pod", "Restarting", "busy"))
+                api.restart_pod(settings.pod_id)
                 connection = api.wait_for_ssh(
                     settings.pod_id,
                     progress=lambda line: self._event("log", (line, "info")),
                 )
-            else:
-                self._event("log", ("RunPod is already online.", "info"))
             host, port = connection.host, connection.ssh_port
             self._event("connection", (host, port))
         return host, port
