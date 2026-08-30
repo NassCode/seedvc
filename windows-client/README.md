@@ -16,6 +16,20 @@ Run `setup-gui.bat` once, then double-click `run-gui.bat`. The controller:
 - shows pod, server, tunnel, and voice status with a live activity log; and
 - can start, discover, and stop an existing RunPod Pod through the RunPod API.
 
+### Change the reference voice
+
+On the **Audio** tab, choose a reference recording and click **Upload & use**.
+The controller uploads it through the encrypted SSH connection. The Pod uses
+FFmpeg to normalize the recording to mono 24 kHz PCM16, rejects files shorter
+than 5 seconds, longer than 120 seconds, or effectively silent, and then reloads
+Fast-VC. If the new reference cannot start, the previous reference is restored.
+
+Seed-VC uses at most the first five seconds with the current configuration, so
+pick a clean section of one speaker without music, overlapping speech, echo, or
+heavy noise. WAV, MP3, M4A, FLAC, OGG, Opus, AAC, MP4, and WMA uploads up to
+100 MB are accepted. Activation normally takes roughly the same time as a model
+restart; an active voice stream is stopped and resumed automatically.
+
 For automatic Pod management, enter the Pod ID and a restricted RunPod API key,
 then enable **Start and discover the pod through the RunPod API**. The key is
 stored by Windows Credential Manager and is never written to the repository or

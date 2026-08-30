@@ -32,6 +32,20 @@ needed, preserves the cached environment and models under `/workspace`, starts
 Fast-VC-Service in the background, and waits until port 8042 is ready. It is
 safe to run again when the service is already running.
 
+## Activate an uploaded reference voice
+
+The Windows controller uploads to a fixed staging path and invokes:
+
+```bash
+bash /workspace/seedvc/server/activate-reference.sh \
+  /workspace/seedvc/reference-upload
+```
+
+The activation script converts and validates the recording before replacing the
+active reference. It keeps five timestamped rollback copies, restarts the
+service because Fast-VC calculates the reference embedding at initialization,
+and restores the previous WAV automatically if the new service fails to start.
+
 To start the service in the foreground for diagnostics instead:
 
 ```bash

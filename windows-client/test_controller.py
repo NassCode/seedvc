@@ -66,6 +66,43 @@ class SSHCommandTests(unittest.TestCase):
         self.assertIn(str(key), command)
         self.assertEqual(command[-1], "root@example.test")
 
+    def test_reference_upload_command_uses_fixed_remote_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "key"
+            key.touch()
+            reference = Path(directory) / "voice sample.mp3"
+            reference.write_bytes(b"not-real-audio-but-nonempty")
+
+            command = controller.scp_upload_command(
+                "example.test", 1234, str(key), reference
+            )
+
+        self.assertEqual(command[0], "scp")
+        self.assertIn(str(reference), command)
+        self.assertEqual(
+            command[-1],
+            "root@example.test:/workspace/seedvc/reference-upload",
+        )
+
+
+class ReferenceValidationTests(unittest.TestCase):
+    def test_accepts_supported_nonempty_audio_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "voice.WAV"
+            path.write_bytes(b"audio")
+            self.assertEqual(controller.validate_reference_file(path), path.resolve())
+
+    def test_rejects_unsupported_or_empty_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unsupported = Path(directory) / "voice.txt"
+            unsupported.write_bytes(b"audio")
+            empty = Path(directory) / "voice.wav"
+            empty.touch()
+            with self.assertRaisesRegex(controller.ControllerError, "unsupported"):
+                controller.validate_reference_file(unsupported)
+            with self.assertRaisesRegex(controller.ControllerError, "empty"):
+                controller.validate_reference_file(empty)
+
 
 if __name__ == "__main__":
     unittest.main()

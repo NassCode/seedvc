@@ -16,6 +16,19 @@ APP_NAME = "SeedVC"
 CREDENTIAL_SERVICE = "SeedVC RunPod"
 CREDENTIAL_USERNAME = "api-key"
 RUNPOD_API_BASE = "https://rest.runpod.io/v1"
+MAX_REFERENCE_BYTES = 100 * 1024 * 1024
+REFERENCE_EXTENSIONS = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".mp4",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".wma",
+}
+REMOTE_REFERENCE_UPLOAD = "/workspace/seedvc/reference-upload"
 
 
 class ControllerError(RuntimeError):
@@ -33,6 +46,8 @@ class Settings:
     ssh_key: str = ""
     local_port: int = 8042
     stop_pod_on_exit: bool = False
+    reference_file: str = ""
+    active_reference: str = "Saudi Arabic (bundled)"
 
 
 @dataclass(frozen=True)
@@ -235,4 +250,51 @@ def tunnel_command(host: str, port: int, key_path: str, local_port: int) -> list
     return command
 
 
+def validate_reference_file(path: str | Path) -> Path:
+    reference = Path(path).expanduser()
+    if not reference.is_file():
+        raise ControllerError(f"reference audio file does not exist: {reference}")
+    if reference.suffix.casefold() not in REFERENCE_EXTENSIONS:
+        supported = ", ".join(sorted(REFERENCE_EXTENSIONS))
+        raise ControllerError(f"unsupported reference format; choose one of: {supported}")
+    try:
+        size = reference.stat().st_size
+    except OSError as exc:
+        raise ControllerError(f"could not inspect reference audio: {exc}") from exc
+    if size == 0:
+        raise ControllerError("reference audio file is empty")
+    if size > MAX_REFERENCE_BYTES:
+        raise ControllerError("reference audio exceeds the 100 MB upload limit")
+    return reference.resolve()
+
+
+def scp_upload_command(
+    host: str,
+    port: int,
+    key_path: str,
+    local_path: str | Path,
+    remote_path: str = REMOTE_REFERENCE_UPLOAD,
+) -> list[str]:
+    # Reuse SSH validation and options, but translate OpenSSH's port flag for SCP.
+    ssh = ssh_base_command(host, port, key_path)
+    reference = validate_reference_file(local_path)
+    return [
+        "scp",
+        "-P",
+        str(port),
+        "-i",
+        ssh[ssh.index("-i") + 1],
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        str(reference),
+        f"root@{host.strip()}:{remote_path}",
+    ]
+
+
 REMOTE_START_COMMAND = "bash /workspace/seedvc/server/start.sh"
+REMOTE_ACTIVATE_REFERENCE_COMMAND = (
+    "bash /workspace/seedvc/server/activate-reference.sh "
+    f"{REMOTE_REFERENCE_UPLOAD}"
+)
