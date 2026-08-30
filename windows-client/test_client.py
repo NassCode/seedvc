@@ -1,7 +1,11 @@
+import argparse
+import asyncio
+import json
 import unittest
 from unittest import mock
 
 import numpy as np
+import websockets
 
 import client
 
@@ -92,15 +96,14 @@ class ClientTests(unittest.TestCase):
     def test_start_signal_sample_rates_match_protocol(self):
         capture_rate = 48_000
         output_rate = 48_000
-        signal = {
-            "signal": "start",
-            "sample_rate": client.SERVER_INPUT_SR,
-            "sample_rate_out": output_rate,
-            "sample_bit": 16,
-        }
+        signal = client.build_start_signal("stream_test", output_rate)
         self.assertNotEqual(capture_rate, signal["sample_rate"])
+        self.assertEqual(signal["signal"], "start")
+        self.assertEqual(signal["stream_id"], "stream_test")
         self.assertEqual(signal["sample_rate"], 16_000)
         self.assertEqual(signal["sample_rate_out"], output_rate)
+        self.assertEqual(signal["sample_bit"], 16)
+        self.assertEqual(signal["encoding"], "PCM")
 
     def test_streaming_resampler_converts_native_rate_to_server_rate(self):
         resampler = client.make_resampler(48_000, client.SERVER_INPUT_SR)
@@ -111,6 +114,92 @@ class ClientTests(unittest.TestCase):
         output.append(resampler.resample_chunk(np.zeros(0, dtype=np.int16), last=True))
 
         self.assertEqual(sum(map(len, output)), client.SERVER_INPUT_SR)
+
+
+class FakeInputStream:
+    def __init__(self, *args, callback, blocksize, **kwargs):
+        self.callback = callback
+        self.blocksize = blocksize
+
+    def __enter__(self):
+        # Feed enough 48 kHz chunks to move past SoXR's initial filter delay.
+        for _ in range(5):
+            self.callback(
+                np.zeros((self.blocksize, 1), dtype=np.int16),
+                self.blocksize,
+                None,
+                None,
+            )
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+
+class FakeOutputStream:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+
+class ProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_simple_protocol_exchange(self):
+        observed = {"binary_frames": 0, "end": None}
+
+        async def handler(websocket):
+            observed["start"] = json.loads(await websocket.recv())
+            frame = await websocket.recv()
+            self.assertIsInstance(frame, bytes)
+            observed["binary_frames"] += 1
+            await websocket.send(np.zeros(960, dtype=np.int16).tobytes())
+            await websocket.send(json.dumps({"signal": "completed"}))
+            while True:
+                message = await websocket.recv()
+                if isinstance(message, bytes):
+                    observed["binary_frames"] += 1
+                    continue
+                observed["end"] = json.loads(message)
+                break
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            args = argparse.Namespace(
+                url=f"ws://127.0.0.1:{port}/ws",
+                capture_sample_rate=48_000,
+                output_sample_rate=48_000,
+                chunk_ms=20,
+                connect_timeout=2.0,
+            )
+            patches = [
+                mock.patch.object(client.sd, "query_devices", side_effect=lambda i: DEVICES[i]),
+                mock.patch.object(
+                    client.sd,
+                    "query_hostapis",
+                    side_effect=lambda i: [{"name": "Windows WASAPI"}, {"name": "MME"}][i],
+                ),
+                mock.patch.object(client.sd, "check_input_settings"),
+                mock.patch.object(client.sd, "check_output_settings"),
+                mock.patch.object(client.sd, "InputStream", FakeInputStream),
+                mock.patch.object(client.sd, "OutputStream", FakeOutputStream),
+            ]
+            for patcher in patches:
+                patcher.start()
+                self.addCleanup(patcher.stop)
+
+            async with asyncio.timeout(3):
+                await client.run_remote(args, 0, 1)
+
+        self.assertEqual(observed["start"]["signal"], "start")
+        self.assertEqual(observed["start"]["sample_rate"], 16_000)
+        self.assertEqual(observed["start"]["sample_rate_out"], 48_000)
+        self.assertEqual(observed["start"]["encoding"], "PCM")
+        self.assertGreaterEqual(observed["binary_frames"], 1)
+        self.assertEqual(observed["end"], {"signal": "end"})
 
 
 if __name__ == "__main__":

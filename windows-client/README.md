@@ -75,6 +75,11 @@ device, server, underrun, and timeout failures.
 python -m unittest -v
 ```
 
+The suite includes a local WebSocket server that verifies the exact
+Fast-VC-Service simple-protocol start, binary PCM, converted PCM, completion,
+and end-message exchange. The protocol was checked against upstream
+Fast-VC-Service commit `27eced5` (2026-08-18).
+
 ## Security note
 
 Do not expose an unauthenticated plain `ws://` endpoint directly to the public Internet for production use. The prototype should first be tested through a private tunnel or a TLS/authenticated reverse proxy.

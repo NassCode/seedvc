@@ -262,6 +262,18 @@ def queue_capacity(chunk_ms: int) -> int:
     return max(4, QUEUE_AUDIO_MS // chunk_ms)
 
 
+def build_start_signal(stream_id: str, output_rate: int) -> dict:
+    """Build Fast-VC-Service's supported simple-protocol configuration."""
+    return {
+        "signal": "start",
+        "stream_id": stream_id,
+        "sample_rate": SERVER_INPUT_SR,
+        "sample_rate_out": output_rate,
+        "sample_bit": 16,
+        "encoding": "PCM",
+    }
+
+
 def run_local(args: argparse.Namespace, input_device: int, output_device: int) -> None:
     capture_rate = args.capture_sample_rate or default_sample_rate(input_device)
     output_rate = args.output_sample_rate or default_sample_rate(output_device)
@@ -383,14 +395,7 @@ async def run_remote(
             ping_timeout=20,
             compression=None,
         ) as websocket:
-            start_signal = {
-                "signal": "start",
-                "stream_id": stream_id,
-                "sample_rate": SERVER_INPUT_SR,
-                "sample_rate_out": output_rate,
-                "sample_bit": 16,
-                "encoding": "PCM",
-            }
+            start_signal = build_start_signal(stream_id, output_rate)
             await websocket.send(json.dumps(start_signal))
             status(f"connected; stream {stream_id}")
 
