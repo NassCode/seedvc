@@ -21,7 +21,18 @@ bash server/bootstrap.sh
 The initial install and first service start download large Python/model assets.
 Keep `/workspace` persistent so they survive Pod restarts.
 
-Start the service in the foreground for the first test:
+Start or verify the service with the idempotent launcher:
+
+```bash
+bash /workspace/seedvc/server/start.sh
+```
+
+The launcher restores the container-layer runtime after a Pod restart when
+needed, preserves the cached environment and models under `/workspace`, starts
+Fast-VC-Service in the background, and waits until port 8042 is ready. It is
+safe to run again when the service is already running.
+
+To start the service in the foreground for diagnostics instead:
 
 ```bash
 cd /workspace/fast-vc-service
