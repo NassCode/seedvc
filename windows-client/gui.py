@@ -338,6 +338,15 @@ class SeedVCApp:
     def _resolve_connection(self, settings: Settings, api_key: str) -> tuple[str, int]:
         host, port = settings.ssh_host, settings.ssh_port
         if settings.manage_pod:
+            # RunPod's REST response can briefly (and occasionally repeatedly)
+            # advertise an old direct-TCP mapping after a restart. Prefer the
+            # last discovered endpoint only while it is demonstrably reachable.
+            if host and tcp_open(host, port, timeout=1.0):
+                self._event(
+                    "log",
+                    (f"Reusing reachable SSH endpoint {host}:{port}.", "info"),
+                )
+                return host, port
             api = RunPodAPI(api_key)
             connection = pod_connection(api.get_pod(settings.pod_id))
             if connection is None:
