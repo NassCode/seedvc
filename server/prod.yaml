@@ -1,0 +1,49 @@
+app:
+  host: "0.0.0.0"
+  port: 8042
+  workers: 1
+  receive_timeout: 120
+  log_dir: logs
+
+buffer:
+  prefill_time: 375
+  opus_frame_duration: 20
+
+realtime_vc:
+  device: ["cuda:0"]
+  is_debug: false
+  reference_wav_path: "server/resources/refs/ref-arabic-saudi-24k.wav"
+  save_dir: "outputs/"
+  save_input: false
+  save_output: false
+  SAMPLERATE_IN: 16000
+  SAMPLERATE_OUT: 22050
+  BIT_DEPTH: 16
+  FRAMERATE: 50
+  extra_time_ce: 4.5
+  extra_time_dit: 1.5
+  sola_buffer_time: 0.04
+  block_time: 0.5
+  extra_time_right: 0.02
+  is_f0: false
+  total_block_for_f0: 6
+  diffusion_steps: 5
+  inference_cfg_rate: 0.7
+  max_prompt_length: 5.0
+  rms_mix_rate: 0.9
+  is_sola: true
+  send_slow_threshold: 100
+  recv_slow_threshold: 700
+  vc_slow_threshold: 300
+
+models:
+  is_torch_compile: false
+  is_retrieval: false
+  index_rate: 1.0
+  index_path: null
+  speech_noise_thres: 0.8
+  decibel_thres: -50
+  t_span_schedule: "cosine"
+  dit_checkpoint_path: null
+  dit_config_path: null
+  defalut_original_model: "tiny"
