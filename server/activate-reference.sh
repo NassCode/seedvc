@@ -6,11 +6,20 @@ SCRIPT_DIR="$(cd -- "$SCRIPT_DIR" && pwd)"
 APP_DIR="${APP_DIR:-/workspace/fast-vc-service}"
 CONFIG="${CONFIG:-configs/seedvc-saudi.yaml}"
 INPUT="${1:-/workspace/seedvc/reference-upload}"
+DISPLAY_NAME="${2:-Uploaded voice}"
 ACTIVE_REFERENCE="$APP_DIR/resources/refs/ref-arabic-saudi-24k.wav"
+LIBRARY_SCRIPT="$SCRIPT_DIR/reference_library.py"
 BACKUP_DIR="/workspace/seedvc/backups/references"
 TEMP_REFERENCE="$APP_DIR/resources/refs/.reference-24k.tmp.wav"
 ROLLBACK_REFERENCE="$APP_DIR/resources/refs/.reference-rollback.wav"
 SERVICE_PATTERN="fast-vc serve --config $CONFIG"
+
+stored_voice_id=""
+if [ "$INPUT" = "--stored" ]; then
+  stored_voice_id="${2:-}"
+  INPUT="$(python3 "$LIBRARY_SCRIPT" path "$stored_voice_id")"
+  DISPLAY_NAME="stored voice"
+fi
 
 if [ ! -f "$INPUT" ]; then
   echo "Reference upload not found: $INPUT" >&2
@@ -21,8 +30,8 @@ if [ ! -f "$ACTIVE_REFERENCE" ]; then
   exit 1
 fi
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "FFmpeg is unavailable; run server/bootstrap.sh first." >&2
-  exit 1
+  echo "FFmpeg is unavailable after the Pod reset; restoring the runtime..."
+  bash "$SCRIPT_DIR/bootstrap.sh"
 fi
 
 mkdir -p "$(dirname -- "$ACTIVE_REFERENCE")" "$BACKUP_DIR"
@@ -56,6 +65,11 @@ with wave.open(str(path), "rb") as wav:
 print(f"Validated reference: {duration:.2f}s, mono, 24 kHz, PCM16, peak={peak}")
 PY
 
+if [ -z "$stored_voice_id" ]; then
+  stored_voice_id="$(python3 "$LIBRARY_SCRIPT" store "$TEMP_REFERENCE" "$DISPLAY_NAME")"
+  echo "Stored reference voice in the persistent library: $DISPLAY_NAME"
+fi
+
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup="$BACKUP_DIR/reference-$stamp.wav"
 cp "$ACTIVE_REFERENCE" "$ROLLBACK_REFERENCE"
@@ -77,12 +91,15 @@ if pgrep -f "$SERVICE_PATTERN" >/dev/null 2>&1; then
 fi
 
 if bash "$SCRIPT_DIR/start.sh"; then
-  rm -f "$INPUT"
+  python3 "$LIBRARY_SCRIPT" activate "$stored_voice_id"
+  if [ "$INPUT" = "/workspace/seedvc/reference-upload" ]; then
+    rm -f "$INPUT"
+  fi
   # Keep only the five most recent rollback copies.
   find "$BACKUP_DIR" -maxdepth 1 -type f -name 'reference-*.wav' -printf '%T@ %p\n' \
     | sort -nr | awk 'NR > 5 {sub(/^[^ ]+ /, ""); print}' \
     | while IFS= read -r old_backup; do rm -f -- "$old_backup"; done
-  echo "New reference voice is active. Backup: $backup"
+  echo "New reference voice is active. Voice ID: $stored_voice_id. Backup: $backup"
   exit 0
 fi
 

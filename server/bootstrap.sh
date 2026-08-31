@@ -64,6 +64,10 @@ uv sync
 install -d "$APP_DIR/configs" "$APP_DIR/resources/refs" "$APP_DIR/outputs" "$APP_DIR/logs" "$APP_DIR/temp"
 install -m 0644 "$CONFIG_SOURCE" "$DEPLOY_CONFIG"
 install -m 0644 "$REFERENCE_SOURCE" "$DEPLOY_REFERENCE"
+python3 "$SCRIPT_DIR/reference_library.py" seed \
+  "$REFERENCE_SOURCE" "Saudi Arabic (bundled)" >/dev/null
+ACTIVE_LIBRARY_REFERENCE="$(python3 "$SCRIPT_DIR/reference_library.py" active-path)"
+install -m 0644 "$ACTIVE_LIBRARY_REFERENCE" "$DEPLOY_REFERENCE"
 
 uv run python "$SCRIPT_DIR/validate_deployment.py" \
   --root "$APP_DIR" \

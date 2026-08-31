@@ -18,6 +18,7 @@ class SettingsTests(unittest.TestCase):
                 manage_pod=True,
                 ssh_host="203.0.113.1",
                 ssh_port=12345,
+                ssh_pod_id="pod123",
                 ssh_key="keyfile",
             )
             controller.save_settings(expected, path)
@@ -76,8 +77,42 @@ class PodTests(unittest.TestCase):
 
         request.assert_called_once_with("POST", "/pods/pod123/restart")
 
+    @mock.patch.object(controller.RunPodAPI, "_request")
+    def test_configure_public_key_preserves_environment(self, request):
+        request.side_effect = (
+            {"env": {"JUPYTER_PASSWORD": "keep-me", "PUBLIC_KEY": ""}},
+            {},
+        )
+        api = controller.RunPodAPI("secret", base_url="https://example.test")
+
+        api.configure_public_key("pod123", "ssh-ed25519 AAAA test")
+
+        request.assert_has_calls(
+            [
+                mock.call("GET", "/pods/pod123"),
+                mock.call(
+                    "POST",
+                    "/pods/pod123/update",
+                    {
+                        "env": {
+                            "JUPYTER_PASSWORD": "keep-me",
+                            "PUBLIC_KEY": "ssh-ed25519 AAAA test",
+                        }
+                    },
+                ),
+            ]
+        )
+
 
 class SSHCommandTests(unittest.TestCase):
+    def test_parses_runpod_ssh_command(self):
+        connection, key = controller.parse_ssh_command(
+            "ssh root@203.0.113.4 -p 17644 -i ~/.ssh/id_ed25519"
+        )
+
+        self.assertEqual(connection, controller.PodConnection("203.0.113.4", 17644))
+        self.assertEqual(Path(key), Path.home() / ".ssh" / "id_ed25519")
+
     def test_tunnel_command_is_argument_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             key = Path(directory) / "key with spaces"
@@ -125,6 +160,22 @@ class ReferenceValidationTests(unittest.TestCase):
                 controller.validate_reference_file(unsupported)
             with self.assertRaisesRegex(controller.ControllerError, "empty"):
                 controller.validate_reference_file(empty)
+
+    def test_parses_voice_library_and_builds_safe_activation_commands(self):
+        voice_id = "a" * 32
+        voices, active_id = controller.parse_voice_library(
+            json.dumps(
+                {
+                    "active_id": voice_id,
+                    "voices": [{"id": voice_id, "name": "Arabic female"}],
+                }
+            )
+        )
+
+        self.assertEqual(voices, [controller.VoiceReference(voice_id, "Arabic female")])
+        self.assertEqual(active_id, voice_id)
+        self.assertIn("'voice; name.mp3'", controller.reference_upload_activate_command("voice; name.mp3"))
+        self.assertTrue(controller.reference_stored_activate_command(voice_id).endswith(voice_id))
 
 
 if __name__ == "__main__":

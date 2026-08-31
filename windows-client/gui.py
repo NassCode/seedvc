@@ -15,13 +15,18 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 import client
 from controller import (
     ControllerError,
-    REMOTE_ACTIVATE_REFERENCE_COMMAND,
+    REMOTE_LIST_REFERENCES_COMMAND,
     REMOTE_START_COMMAND,
     RunPodAPI,
     Settings,
     get_api_key,
     load_settings,
     pod_connection,
+    parse_ssh_command,
+    parse_voice_library,
+    public_key_for_private,
+    reference_stored_activate_command,
+    reference_upload_activate_command,
     save_settings,
     scp_upload_command,
     ssh_base_command,
@@ -57,6 +62,7 @@ class SeedVCApp:
         self.closing = False
         self.input_devices: dict[str, int] = {}
         self.output_devices: dict[str, int] = {}
+        self.stored_voices: dict[str, str] = {}
 
         try:
             self.settings = load_settings()
@@ -67,6 +73,7 @@ class SeedVCApp:
             self.settings.ssh_key = str(candidate)
         self.reference_file_var = tk.StringVar(value=self.settings.reference_file)
         self.active_reference_var = tk.StringVar(value=self.settings.active_reference)
+        self.stored_voice_var = tk.StringVar()
 
         self._build_style()
         self._build_ui()
@@ -177,22 +184,39 @@ class SeedVCApp:
             reference_buttons, text="Upload & use", command=self.upload_reference
         )
         self.upload_button.pack(side="left", padx=(5, 0))
-        ttk.Label(frame, text="Active reference").grid(
+        ttk.Label(frame, text="Stored voices").grid(
             row=3, column=0, sticky="w", padx=(0, 12), pady=6
         )
+        self.stored_voice_combo = ttk.Combobox(
+            frame, textvariable=self.stored_voice_var, state="readonly"
+        )
+        self.stored_voice_combo.grid(row=3, column=1, sticky="ew", pady=6)
+        stored_buttons = ttk.Frame(frame)
+        stored_buttons.grid(row=3, column=2, padx=(10, 0))
+        self.refresh_voices_button = ttk.Button(
+            stored_buttons, text="Refresh", command=self.refresh_stored_voices
+        )
+        self.refresh_voices_button.pack(side="left")
+        self.use_voice_button = ttk.Button(
+            stored_buttons, text="Use selected", command=self.use_stored_voice
+        )
+        self.use_voice_button.pack(side="left", padx=(5, 0))
+        ttk.Label(frame, text="Active reference").grid(
+            row=4, column=0, sticky="w", padx=(0, 12), pady=6
+        )
         ttk.Label(frame, textvariable=self.active_reference_var).grid(
-            row=3, column=1, columnspan=2, sticky="w", pady=6
+            row=4, column=1, columnspan=2, sticky="w", pady=6
         )
         ttk.Label(
             frame,
             text="Use clear speech of at least 5 seconds. The server accepts WAV, MP3, M4A, FLAC, OGG, Opus, AAC, MP4, and WMA.",
             style="Subtitle.TLabel",
-        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(7, 0))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(7, 0))
         ttk.Label(
             frame,
             text="Your calling app should use CABLE Output as its microphone.",
             style="Subtitle.TLabel",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     def _build_runpod_tab(self, frame: ttk.Frame) -> None:
         frame.columnconfigure(1, weight=1)
@@ -215,25 +239,35 @@ class SeedVCApp:
             ("RunPod API key", self.api_key_var, True),
             ("SSH host", self.host_var, False),
             ("SSH port", self.port_var, False),
-            ("SSH private key", self.key_var, False),
+            ("SSH key or command", self.key_var, False),
         )
         for row, (label, variable, secret) in enumerate(fields, start=1):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
             entry = ttk.Entry(frame, textvariable=variable, show="•" if secret else "")
             entry.grid(row=row, column=1, sticky="ew", pady=4)
-            if label == "SSH private key":
-                ttk.Button(frame, text="Browse…", command=self.browse_key).grid(row=row, column=2, padx=(8, 0))
+            if label == "SSH key or command":
+                key_buttons = ttk.Frame(frame)
+                key_buttons.grid(row=row, column=2, padx=(8, 0))
+                ttk.Button(key_buttons, text="Browse…", command=self.browse_key).pack(side="left")
+                ttk.Button(
+                    key_buttons, text="Apply command", command=self.apply_ssh_command
+                ).pack(side="left", padx=(5, 0))
+
+        self.configure_ssh_button = ttk.Button(
+            frame, text="Install selected SSH key on Pod", command=self.configure_pod_ssh
+        )
+        self.configure_ssh_button.grid(row=6, column=1, sticky="w", pady=(7, 0))
 
         ttk.Label(
             frame,
             text="The API key is stored in Windows Credential Manager, never in settings.json.",
             style="Subtitle.TLabel",
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(7, 0))
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(7, 0))
         ttk.Checkbutton(
             frame,
             text="Stop the RunPod automatically when this app closes",
             variable=self.stop_on_exit_var,
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(7, 0))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(7, 0))
 
     def _load_api_key(self) -> None:
         try:
@@ -245,6 +279,19 @@ class SeedVCApp:
         path = filedialog.askopenfilename(title="Select SSH private key", initialdir=str(Path.home() / ".ssh"))
         if path:
             self.key_var.set(path)
+
+    def apply_ssh_command(self) -> None:
+        try:
+            connection, key_path = parse_ssh_command(self.key_var.get().strip())
+        except ControllerError as exc:
+            messagebox.showerror("SSH command", str(exc))
+            return
+        self.host_var.set(connection.host)
+        self.port_var.set(str(connection.ssh_port))
+        self.key_var.set(key_path)
+        self._log(
+            f"Applied SSH command: {connection.host}:{connection.ssh_port}, key {key_path}"
+        )
 
     def choose_reference(self) -> None:
         path = filedialog.askopenfilename(
@@ -317,6 +364,12 @@ class SeedVCApp:
 
     def _current_settings(self) -> Settings:
         input_device, output_device = self._selected_devices()
+        key_value = self.key_var.get().strip()
+        if key_value.casefold().startswith(("ssh ", "ssh.exe ")):
+            connection, key_value = parse_ssh_command(key_value)
+            self.host_var.set(connection.host)
+            self.port_var.set(str(connection.ssh_port))
+            self.key_var.set(key_value)
         try:
             ssh_port = int(self.port_var.get())
         except ValueError as exc:
@@ -328,7 +381,12 @@ class SeedVCApp:
             manage_pod=self.manage_var.get(),
             ssh_host=self.host_var.get().strip(),
             ssh_port=ssh_port,
-            ssh_key=self.key_var.get().strip(),
+            ssh_pod_id=(
+                self.settings.ssh_pod_id
+                if self.pod_id_var.get().strip() == self.settings.pod_id
+                else ""
+            ),
+            ssh_key=key_value,
             local_port=8042,
             stop_pod_on_exit=self.stop_on_exit_var.get(),
             reference_file=self.reference_file_var.get().strip(),
@@ -341,7 +399,11 @@ class SeedVCApp:
             # RunPod's REST response can briefly (and occasionally repeatedly)
             # advertise an old direct-TCP mapping after a restart. Prefer the
             # last discovered endpoint only while it is demonstrably reachable.
-            if host and tcp_open(host, port, timeout=1.0):
+            if (
+                settings.ssh_pod_id == settings.pod_id
+                and host
+                and tcp_open(host, port, timeout=1.0)
+            ):
                 self._event(
                     "log",
                     (f"Reusing reachable SSH endpoint {host}:{port}.", "info"),
@@ -376,8 +438,96 @@ class SeedVCApp:
                     progress=lambda line: self._event("log", (line, "info")),
                 )
             host, port = connection.host, connection.ssh_port
-            self._event("connection", (host, port))
+            self._event("connection", (host, port, settings.pod_id))
         return host, port
+
+    def configure_pod_ssh(self) -> None:
+        try:
+            settings = self._current_settings()
+            if not settings.manage_pod or not settings.pod_id:
+                raise ControllerError("Enable RunPod automation and enter a Pod ID first")
+            api_key = self.api_key_var.get().strip()
+            if not api_key:
+                raise ControllerError("RunPod API key is required")
+            public_key = public_key_for_private(settings.ssh_key)
+        except ControllerError as exc:
+            messagebox.showerror("Configure Pod SSH", str(exc))
+            return
+        if not messagebox.askyesno(
+            "Configure Pod SSH",
+            "Install the selected public key on this Pod? RunPod will reset the container, "
+            "but files under /workspace will remain.",
+        ):
+            return
+        self.configure_ssh_button.configure(state="disabled")
+        self._set_status("pod", "Configuring SSH", "busy")
+
+        def worker() -> None:
+            try:
+                api = RunPodAPI(api_key)
+                self._event("log", ("Installing the selected SSH public key on the Pod…", "info"))
+                api.configure_public_key(settings.pod_id, public_key)
+                connection = api.wait_for_ssh(
+                    settings.pod_id,
+                    timeout=300,
+                    progress=lambda line: self._event("log", (line, "info")),
+                )
+                self._event(
+                    "connection", (connection.host, connection.ssh_port, settings.pod_id)
+                )
+                self._event("status", ("pod", "Online", "ok"))
+                self._event("log", ("Pod SSH key is configured and reachable.", "info"))
+            except ControllerError as exc:
+                self._event("status", ("pod", "SSH error", "error"))
+                self._event("error", str(exc))
+            finally:
+                self._event("configure_ssh_finished", None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _load_voice_library_remote(self, host: str, port: int, key_path: str) -> None:
+        result = subprocess.run(
+            ssh_base_command(host, port, key_path) + [REMOTE_LIST_REFERENCES_COMMAND],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=CREATE_FLAGS,
+        )
+        if result.returncode:
+            detail = result.stdout.strip() or f"SSH exit {result.returncode}"
+            raise ControllerError(f"could not load stored voices: {detail}")
+        voices, active_id = parse_voice_library(result.stdout.strip())
+        self._event("voice_library", (voices, active_id))
+
+    def refresh_stored_voices(self) -> None:
+        if self.uploading:
+            return
+        try:
+            settings = self._current_settings()
+            api_key = self.api_key_var.get().strip()
+            if settings.manage_pod and (not settings.pod_id or not api_key):
+                raise ControllerError("Pod ID and RunPod API key are required")
+            if not settings.manage_pod:
+                ssh_base_command(settings.ssh_host, settings.ssh_port, settings.ssh_key)
+        except ControllerError as exc:
+            messagebox.showerror("Stored voices", str(exc))
+            return
+        self.refresh_voices_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                host, port = self._resolve_connection(settings, api_key)
+                self._load_voice_library_remote(host, port, settings.ssh_key)
+                self._event("status", ("pod", "Online", "ok"))
+            except (ControllerError, OSError, subprocess.TimeoutExpired) as exc:
+                self._event("error", str(exc))
+            finally:
+                self._event("refresh_voices_finished", None)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def start(self) -> None:
         if self.working or (self.client_process and self.client_process.poll() is None):
@@ -428,6 +578,10 @@ class SeedVCApp:
             if result.returncode:
                 raise ControllerError(f"pod service startup failed (SSH exit {result.returncode})")
             self._event("status", ("server", "Ready", "ok"))
+            try:
+                self._load_voice_library_remote(host, port, settings.ssh_key)
+            except ControllerError as exc:
+                self._event("log", (str(exc), "warning"))
 
             local_port = settings.local_port
             if tcp_open("127.0.0.1", local_port):
@@ -514,10 +668,15 @@ class SeedVCApp:
         if was_active:
             self.stop_voice()
         self.uploading = True
-        self.upload_button.configure(state="disabled")
-        self.start_button.configure(state="disabled")
-        self.local_button.configure(state="disabled")
-        self.stop_pod_button.configure(state="disabled")
+        for button in (
+            self.upload_button,
+            self.use_voice_button,
+            self.refresh_voices_button,
+            self.start_button,
+            self.local_button,
+            self.stop_pod_button,
+        ):
+            button.configure(state="disabled")
         self._set_status("server", "Updating voice", "busy")
         api_key = self.api_key_var.get().strip()
         threading.Thread(
@@ -563,7 +722,7 @@ class SeedVCApp:
             self._event("log", ("Validating and activating the reference on RunPod…", "info"))
             activate = subprocess.run(
                 ssh_base_command(host, port, settings.ssh_key)
-                + [REMOTE_ACTIVATE_REFERENCE_COMMAND],
+                + [reference_upload_activate_command(reference.name)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -579,7 +738,97 @@ class SeedVCApp:
                     f"reference activation failed (SSH exit {activate.returncode}); the previous voice was restored"
                 )
             self._event("status", ("server", "Ready", "ok"))
+            self._load_voice_library_remote(host, port, settings.ssh_key)
             self._event("reference_done", (reference.name, str(reference), resume_voice))
+        except (ControllerError, OSError, subprocess.TimeoutExpired) as exc:
+            self._event("status", ("server", "Error", "error"))
+            self._event("error", str(exc))
+        finally:
+            self._event("upload_finished", None)
+
+    def use_stored_voice(self) -> None:
+        if self.uploading:
+            return
+        label = self.stored_voice_var.get()
+        voice_id = self.stored_voices.get(label)
+        if not voice_id:
+            messagebox.showinfo("Stored voices", "Select a stored voice first.")
+            return
+        try:
+            settings = self._current_settings()
+            api_key = self.api_key_var.get().strip()
+            if settings.manage_pod and (not settings.pod_id or not api_key):
+                raise ControllerError("Pod ID and RunPod API key are required")
+            if not settings.manage_pod:
+                ssh_base_command(settings.ssh_host, settings.ssh_port, settings.ssh_key)
+        except ControllerError as exc:
+            messagebox.showerror("Stored voices", str(exc))
+            return
+        if not messagebox.askyesno(
+            "Activate stored voice",
+            f"Switch to '{label}'? Fast-VC will reload briefly.",
+        ):
+            return
+        was_active = self.client_process is not None and self.client_process.poll() is None
+        if was_active:
+            self.stop_voice()
+        self.uploading = True
+        for button in (
+            self.upload_button,
+            self.use_voice_button,
+            self.refresh_voices_button,
+            self.start_button,
+            self.local_button,
+            self.stop_pod_button,
+        ):
+            button.configure(state="disabled")
+        self._set_status("server", "Switching voice", "busy")
+        threading.Thread(
+            target=self._activate_stored_worker,
+            args=(settings, api_key, voice_id, label, was_active),
+            daemon=True,
+        ).start()
+
+    def _activate_stored_worker(
+        self,
+        settings: Settings,
+        api_key: str,
+        voice_id: str,
+        display_name: str,
+        resume_voice: bool,
+    ) -> None:
+        try:
+            process = self.client_process
+            if process and process.poll() is None:
+                try:
+                    process.wait(timeout=12)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait(timeout=5)
+            host, port = self._resolve_connection(settings, api_key)
+            self._event("status", ("pod", "Online", "ok"))
+            self._event("log", (f"Activating stored voice: {display_name}", "info"))
+            result = subprocess.run(
+                ssh_base_command(host, port, settings.ssh_key)
+                + [reference_stored_activate_command(voice_id)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=480,
+                creationflags=CREATE_FLAGS,
+            )
+            for line in result.stdout.splitlines():
+                self._event("log", (f"pod: {line}", "info"))
+            if result.returncode:
+                raise ControllerError(
+                    f"stored voice activation failed (SSH exit {result.returncode}); "
+                    "the previous voice was restored"
+                )
+            self._event("status", ("server", "Ready", "ok"))
+            self._load_voice_library_remote(host, port, settings.ssh_key)
+            self._event("reference_done", (display_name, "", resume_voice))
         except (ControllerError, OSError, subprocess.TimeoutExpired) as exc:
             self._event("status", ("server", "Error", "error"))
             self._event("error", str(exc))
@@ -701,9 +950,33 @@ class SeedVCApp:
                     key, text, state = value  # type: ignore[misc]
                     self._set_status(key, text, state)
                 elif name == "connection":
-                    host, port = value  # type: ignore[misc]
+                    host, port, pod_id = value  # type: ignore[misc]
                     self.host_var.set(host)
                     self.port_var.set(str(port))
+                    self.settings.ssh_host = host
+                    self.settings.ssh_port = port
+                    self.settings.ssh_pod_id = pod_id
+                elif name == "voice_library":
+                    voices, active_id = value  # type: ignore[misc]
+                    counts: dict[str, int] = {}
+                    for voice in voices:
+                        counts[voice.name] = counts.get(voice.name, 0) + 1
+                    self.stored_voices = {}
+                    selected = ""
+                    active_name = None
+                    for voice in voices:
+                        label = voice.name
+                        if counts[voice.name] > 1:
+                            label = f"{voice.name} ({voice.id[:6]})"
+                        self.stored_voices[label] = voice.id
+                        if voice.id == active_id:
+                            selected = label
+                            active_name = voice.name
+                    self.stored_voice_combo["values"] = list(self.stored_voices)
+                    self.stored_voice_var.set(selected or next(iter(self.stored_voices), ""))
+                    if active_name:
+                        self.active_reference_var.set(active_name)
+                    self._log(f"Loaded {len(voices)} stored voice(s) from the Pod.")
                 elif name == "error":
                     self._log(str(value), "error")
                     if not self.closing:
@@ -713,7 +986,8 @@ class SeedVCApp:
                 elif name == "reference_done":
                     display_name, path, resume_voice = value  # type: ignore[misc]
                     self.active_reference_var.set(display_name)
-                    self.reference_file_var.set(path)
+                    if path:
+                        self.reference_file_var.set(path)
                     try:
                         self.settings = self._current_settings()
                         save_settings(self.settings)
@@ -726,10 +1000,16 @@ class SeedVCApp:
                 elif name == "upload_finished":
                     self.uploading = False
                     self.upload_button.configure(state="normal")
+                    self.use_voice_button.configure(state="normal")
+                    self.refresh_voices_button.configure(state="normal")
                     self.stop_pod_button.configure(state="normal")
                     if not (self.client_process and self.client_process.poll() is None):
                         self.start_button.configure(state="normal")
                         self.local_button.configure(state="normal")
+                elif name == "refresh_voices_finished":
+                    self.refresh_voices_button.configure(state="normal")
+                elif name == "configure_ssh_finished":
+                    self.configure_ssh_button.configure(state="normal")
                 elif name == "buttons":
                     enabled = bool(value)
                     self.local_button.configure(state="normal" if enabled else "disabled")

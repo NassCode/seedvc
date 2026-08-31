@@ -45,6 +45,15 @@ The activation script converts and validates the recording before replacing the
 active reference. It keeps five timestamped rollback copies, restarts the
 service because Fast-VC calculates the reference embedding at initialization,
 and restores the previous WAV automatically if the new service fails to start.
+Normalized voices and their names are retained under `/workspace/seedvc`:
+
+```bash
+python3 /workspace/seedvc/server/reference_library.py list
+bash /workspace/seedvc/server/activate-reference.sh --stored VOICE_ID
+```
+
+The JSON library records the active voice and is shared by replacement Pods
+that attach the same network volume.
 
 To start the service in the foreground for diagnostics instead:
 

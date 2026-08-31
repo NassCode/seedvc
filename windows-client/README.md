@@ -19,7 +19,10 @@ Run `setup-gui.bat` once, then double-click `run-gui.bat`. The controller:
 ### Change the reference voice
 
 On the **Audio** tab, choose a reference recording and click **Upload & use**.
-The controller uploads it through the encrypted SSH connection. The Pod uses
+The controller uploads it through the encrypted SSH connection and stores the
+normalized WAV in the persistent `/workspace/seedvc/voices` library. Use
+**Refresh** and **Use selected** to switch between stored voices without
+uploading them again. The Pod uses
 FFmpeg to normalize the recording to mono 24 kHz PCM16, rejects files shorter
 than 5 seconds, longer than 120 seconds, or effectively silent, and then reloads
 Fast-VC. If the new reference cannot start, the previous reference is restored.
@@ -29,6 +32,14 @@ pick a clean section of one speaker without music, overlapping speech, echo, or
 heavy noise. WAV, MP3, M4A, FLAC, OGG, Opus, AAC, MP4, and WMA uploads up to
 100 MB are accepted. Activation normally takes roughly the same time as a model
 restart; an active voice stream is stopped and resumed automatically.
+
+### SSH setup
+
+The SSH field accepts either a private-key path or the complete SSH command
+shown by RunPod. Click **Apply command** to extract its host, port, and key
+path. If a newly created Pod has no public key configured, choose an existing
+private key and click **Install selected SSH key on Pod**. RunPod resets the
+container during that operation, but `/workspace` data and stored voices remain.
 
 For automatic Pod management, enter the Pod ID and a restricted RunPod API key,
 then enable **Start and discover the pod through the RunPod API**. The key is
