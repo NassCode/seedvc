@@ -26,25 +26,55 @@ if [ "$needs_bootstrap" -eq 1 ]; then
 fi
 
 mkdir -p "$APP_DIR/logs"
-if pgrep -f "fast-vc serve --config $CONFIG" >/dev/null 2>&1; then
+PID_FILE="${PID_FILE:-/tmp/seedvc-fast-vc-8042.pid}"
+service_pid=""
+
+port_ready() {
+  python3 -c 'import socket; s=socket.create_connection(("127.0.0.1", 8042), 1); s.close()' 2>/dev/null
+}
+
+service_pid_matches() {
+  local pid="${1:-}"
+  [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null &&
+    [ -r "/proc/$pid/cmdline" ] &&
+    tr '\0' ' ' <"/proc/$pid/cmdline" | grep -Fq "fast-vc serve --config $CONFIG"
+}
+
+if port_ready; then
   echo "Fast-VC-Service is already running."
-else
+  exit 0
+fi
+
+if [ -f "$PID_FILE" ]; then
+  read -r service_pid <"$PID_FILE" || service_pid=""
+fi
+
+if ! service_pid_matches "$service_pid"; then
+  rm -f "$PID_FILE"
   echo "Starting Fast-VC-Service..."
   cd "$APP_DIR"
-  nohup uv run fast-vc serve --config "$CONFIG" \
+  nohup "$APP_DIR/.venv/bin/fast-vc" serve --config "$CONFIG" \
     >"$LOG_FILE" 2>&1 </dev/null &
+  service_pid=$!
+  printf '%s\n' "$service_pid" >"$PID_FILE"
+else
+  echo "Fast-VC-Service is still starting (PID $service_pid)."
 fi
 
 echo "Waiting for Fast-VC-Service on port 8042..."
-for _ in $(seq 1 180); do
-  if python3 -c 'import socket; s=socket.create_connection(("127.0.0.1", 8042), 1); s.close()' 2>/dev/null; then
+for elapsed in $(seq 1 240); do
+  if port_ready; then
     echo "Fast-VC-Service is ready."
     exit 0
   fi
-  if ! pgrep -f "fast-vc serve --config $CONFIG" >/dev/null 2>&1; then
+  if ! service_pid_matches "$service_pid"; then
     echo "Fast-VC-Service exited during startup. Recent log output:" >&2
     tail -n 50 "$LOG_FILE" >&2 || true
+    rm -f "$PID_FILE"
     exit 1
+  fi
+  if [ $((elapsed % 10)) -eq 0 ]; then
+    echo "Fast-VC models are loading (${elapsed}s elapsed)..."
   fi
   sleep 1
 done

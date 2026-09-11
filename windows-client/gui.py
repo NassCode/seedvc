@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -19,23 +21,32 @@ from controller import (
     REMOTE_START_COMMAND,
     RunPodAPI,
     Settings,
+    gpu_candidate_allowed,
+    gpu_runtime_compatible,
     get_api_key,
+    get_gemini_api_key,
     load_settings,
     pod_connection,
     parse_ssh_command,
     parse_voice_library,
     public_key_for_private,
+    redact_secrets,
     reference_stored_activate_command,
     reference_upload_activate_command,
     save_settings,
     scp_upload_command,
     ssh_base_command,
+    sort_gpu_candidates,
     tcp_open,
     tunnel_command,
     validate_reference_file,
     wait_for_port,
     set_api_key,
+    set_gemini_api_key,
 )
+
+
+GEMINI_AUTOPILOT_MODEL = "gemini-3.6-flash"
 
 
 CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -60,6 +71,8 @@ class SeedVCApp:
         self.working = False
         self.uploading = False
         self.closing = False
+        self.autopilot_replacement_pod_id = ""
+        self.pending_replaced_pod_id = ""
         self.input_devices: dict[str, int] = {}
         self.output_devices: dict[str, int] = {}
         self.stored_voices: dict[str, str] = {}
@@ -68,9 +81,27 @@ class SeedVCApp:
             self.settings = load_settings()
         except ControllerError:
             self.settings = Settings()
-        if not self.settings.ssh_key:
-            candidate = Path.home() / ".ssh" / "runpod_seedvc_v2_ed25519"
+        candidate = Path.home() / ".ssh" / "runpod_seedvc_v2_ed25519"
+        if (
+            not self.settings.ssh_key
+            or not Path(self.settings.ssh_key).expanduser().is_file()
+        ) and candidate.is_file():
             self.settings.ssh_key = str(candidate)
+        self.manage_var = tk.BooleanVar(value=self.settings.manage_pod)
+        self.autopilot_var = tk.BooleanVar(value=self.settings.gemini_autopilot_enabled)
+        self.pod_id_var = tk.StringVar(value=self.settings.pod_id)
+        self.api_key_var = tk.StringVar()
+        self.gemini_api_key_var = tk.StringVar()
+        self.gemini_cli_var = tk.StringVar(value=self.settings.gemini_cli_path)
+        self.gpu_min_var = tk.StringVar(value=str(self.settings.gpu_vram_min_gb))
+        self.gpu_max_var = tk.StringVar(value=str(self.settings.gpu_vram_max_gb))
+        self.network_volume_var = tk.StringVar(
+            value=self.settings.network_volume_id or "xkj0pihu6n"
+        )
+        self.host_var = tk.StringVar(value=self.settings.ssh_host)
+        self.port_var = tk.StringVar(value=str(self.settings.ssh_port))
+        self.key_var = tk.StringVar(value=self.settings.ssh_key)
+        self.stop_on_exit_var = tk.BooleanVar(value=self.settings.stop_pod_on_exit)
         self.reference_file_var = tk.StringVar(value=self.settings.reference_file)
         self.active_reference_var = tk.StringVar(value=self.settings.active_reference)
         self.stored_voice_var = tk.StringVar()
@@ -88,7 +119,8 @@ class SeedVCApp:
         style.configure("Title.TLabel", font=("Segoe UI Semibold", 18))
         style.configure("Subtitle.TLabel", foreground="#555555")
         style.configure("Status.TLabel", font=("Segoe UI Semibold", 10))
-        style.configure("Start.TButton", font=("Segoe UI Semibold", 11), padding=(18, 9))
+        style.configure("Section.TLabel", font=("Segoe UI Semibold", 11))
+        style.configure("Start.TButton", font=("Segoe UI Semibold", 12), padding=(24, 12))
         style.configure("Stop.TButton", padding=(14, 9))
 
     def _build_ui(self) -> None:
@@ -269,11 +301,237 @@ class SeedVCApp:
             variable=self.stop_on_exit_var,
         ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(7, 0))
 
+    def _build_ui(self) -> None:
+        outer = ttk.Frame(self.root, padding=18)
+        outer.pack(fill="both", expand=True)
+
+        header = ttk.Frame(outer)
+        header.pack(fill="x")
+        title_block = ttk.Frame(header)
+        title_block.pack(side="left", fill="x", expand=True)
+        ttk.Label(title_block, text="SeedVC Voice Changer", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            title_block,
+            text="Mic to RunPod Seed-VC to VB-CABLE",
+            style="Subtitle.TLabel",
+        ).pack(anchor="w", pady=(0, 14))
+        ttk.Button(header, text="Advanced Settings", command=self.open_settings).pack(
+            side="right", anchor="n"
+        )
+
+        status_frame = ttk.Frame(outer)
+        status_frame.pack(fill="x", pady=(0, 12))
+        self.status_labels: dict[str, ttk.Label] = {}
+        for column, (key, title) in enumerate(
+            (("pod", "Pod"), ("server", "Server"), ("tunnel", "Tunnel"), ("voice", "Voice"))
+        ):
+            panel = ttk.Frame(status_frame, padding=(10, 7), relief="groove")
+            panel.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 5, 0))
+            status_frame.columnconfigure(column, weight=1)
+            ttk.Label(panel, text=title).pack(anchor="w")
+            label = ttk.Label(panel, text="Off", foreground="#777777", style="Status.TLabel")
+            label.pack(anchor="w")
+            self.status_labels[key] = label
+
+        audio = ttk.Frame(outer)
+        audio.pack(fill="x", pady=(0, 12))
+        audio.columnconfigure(1, weight=1)
+        ttk.Label(audio, text="Audio", style="Section.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
+        self._build_audio_tab(audio, start_row=1)
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill="x", pady=14)
+        self.start_button = ttk.Button(
+            actions, text="Start Pod", style="Start.TButton", command=self.start
+        )
+        self.start_button.pack(side="left")
+        self.stop_button = ttk.Button(
+            actions, text="Stop Voice", style="Stop.TButton", command=self.stop_voice, state="disabled"
+        )
+        self.stop_button.pack(side="left", padx=8)
+        self.local_button = ttk.Button(actions, text="5-second local test", command=self.local_test)
+        self.local_button.pack(side="left")
+        self.stop_pod_button = ttk.Button(actions, text="Stop RunPod", command=self.stop_pod)
+        self.stop_pod_button.pack(side="right")
+
+        log_header = ttk.Frame(outer)
+        log_header.pack(fill="x")
+        ttk.Label(log_header, text="Activity log", font=("Segoe UI Semibold", 10)).pack(side="left")
+        ttk.Button(log_header, text="Clear", command=lambda: self.log.delete("1.0", "end")).pack(side="right")
+        self.log = scrolledtext.ScrolledText(
+            outer,
+            height=13,
+            wrap="word",
+            state="disabled",
+            font=("Cascadia Mono", 9),
+            background="#111827",
+            foreground="#e5e7eb",
+            insertbackground="#ffffff",
+        )
+        self.log.pack(fill="both", expand=True, pady=(5, 0))
+        self._log("Ready. Pick devices and click Start Pod.")
+
+    def _build_audio_tab(self, frame: ttk.Frame, start_row: int = 0) -> None:
+        frame.columnconfigure(1, weight=1)
+        row = start_row
+        ttk.Label(frame, text="Physical microphone").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+        self.input_combo = ttk.Combobox(frame, state="readonly")
+        self.input_combo.grid(row=row, column=1, sticky="ew", pady=6)
+        ttk.Button(frame, text="Refresh devices", command=self.refresh_devices).grid(
+            row=row, column=2, padx=(10, 0)
+        )
+
+        row += 1
+        ttk.Label(frame, text="VB-CABLE playback").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+        self.output_combo = ttk.Combobox(frame, state="readonly")
+        self.output_combo.grid(row=row, column=1, sticky="ew", pady=6)
+
+        row += 1
+        ttk.Label(frame, text="Reference voice file").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+        ttk.Entry(frame, textvariable=self.reference_file_var, state="readonly").grid(
+            row=row, column=1, sticky="ew", pady=6
+        )
+        reference_buttons = ttk.Frame(frame)
+        reference_buttons.grid(row=row, column=2, padx=(10, 0))
+        ttk.Button(reference_buttons, text="Choose...", command=self.choose_reference).pack(side="left")
+        self.upload_button = ttk.Button(
+            reference_buttons, text="Upload & use", command=self.upload_reference
+        )
+        self.upload_button.pack(side="left", padx=(5, 0))
+
+        row += 1
+        ttk.Label(frame, text="Stored voices").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+        self.stored_voice_combo = ttk.Combobox(
+            frame, textvariable=self.stored_voice_var, state="readonly"
+        )
+        self.stored_voice_combo.grid(row=row, column=1, sticky="ew", pady=6)
+        stored_buttons = ttk.Frame(frame)
+        stored_buttons.grid(row=row, column=2, padx=(10, 0))
+        self.refresh_voices_button = ttk.Button(
+            stored_buttons, text="Refresh", command=self.refresh_stored_voices
+        )
+        self.refresh_voices_button.pack(side="left")
+        self.use_voice_button = ttk.Button(
+            stored_buttons, text="Use selected", command=self.use_stored_voice
+        )
+        self.use_voice_button.pack(side="left", padx=(5, 0))
+
+        row += 1
+        ttk.Label(frame, text="Active reference").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(frame, textvariable=self.active_reference_var).grid(
+            row=row, column=1, columnspan=2, sticky="w", pady=6
+        )
+
+        row += 1
+        ttk.Label(
+            frame,
+            text="Use clear speech of at least 5 seconds. Your calling app should use CABLE Output as its microphone.",
+            style="Subtitle.TLabel",
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(7, 0))
+
+    def open_settings(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Advanced Settings")
+        window.transient(self.root)
+        window.grab_set()
+        window.geometry("760x410")
+        window.minsize(680, 370)
+
+        frame = ttk.Frame(window, padding=16)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(1, weight=1)
+
+        ttk.Label(frame, text="RunPod", style="Section.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            frame,
+            text="Autopilot discovers the active pod and SSH endpoint from the network volume.",
+            style="Subtitle.TLabel",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        fields = (
+            ("Network volume ID", self.network_volume_var, False),
+            ("RunPod API key", self.api_key_var, True),
+            ("SSH private key", self.key_var, False),
+        )
+        for row, (label, variable, secret) in enumerate(fields, start=2):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
+            entry = ttk.Entry(frame, textvariable=variable, show="*" if secret else "")
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            if label == "SSH private key":
+                buttons = ttk.Frame(frame)
+                buttons.grid(row=row, column=2, padx=(8, 0))
+                ttk.Button(buttons, text="Browse...", command=self.browse_key).pack(side="left")
+
+        self.configure_ssh_button = ttk.Button(
+            frame, text="Install SSH key on discovered pod", command=self.configure_pod_ssh
+        )
+        self.configure_ssh_button.grid(row=5, column=1, sticky="w", pady=(7, 0))
+        ttk.Checkbutton(
+            frame,
+            text="Stop the RunPod automatically when this app closes",
+            variable=self.stop_on_exit_var,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(7, 0))
+
+        ttk.Separator(frame).grid(row=7, column=0, columnspan=3, sticky="ew", pady=14)
+        ttk.Label(frame, text="Gemini Autopilot", style="Section.TLabel").grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
+        ttk.Checkbutton(
+            frame,
+            text="Let Gemini drive zero-interaction RunPod recovery",
+            variable=self.autopilot_var,
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        autopilot_fields = (
+            ("Gemini API key", self.gemini_api_key_var, True),
+            ("Gemini CLI path", self.gemini_cli_var, False),
+            ("Minimum GPU VRAM GB", self.gpu_min_var, False),
+            ("Maximum GPU VRAM GB", self.gpu_max_var, False),
+        )
+        for row, (label, variable, secret) in enumerate(autopilot_fields, start=10):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
+            ttk.Entry(frame, textvariable=variable, show="*" if secret else "").grid(
+                row=row, column=1, sticky="ew", pady=4
+            )
+
+        ttk.Label(
+            frame,
+            text="Secrets are stored in Windows Credential Manager. Logs are summarized and redacted.",
+            style="Subtitle.TLabel",
+        ).grid(row=14, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        actions = ttk.Frame(frame)
+        actions.grid(row=15, column=0, columnspan=3, sticky="e", pady=(14, 0))
+        ttk.Button(actions, text="Save", command=lambda: self.save_settings_dialog(window)).pack(side="right")
+        ttk.Button(actions, text="Cancel", command=window.destroy).pack(side="right", padx=(0, 8))
+
     def _load_api_key(self) -> None:
         try:
             self.api_key_var.set(get_api_key())
         except ControllerError as exc:
             self._log(str(exc), "warning")
+        try:
+            self.gemini_api_key_var.set(get_gemini_api_key())
+        except ControllerError as exc:
+            self._log(str(exc), "warning")
+
+    def save_settings_dialog(self, window: tk.Toplevel) -> None:
+        try:
+            settings = self._current_settings()
+            save_settings(settings)
+            if self.api_key_var.get().strip():
+                set_api_key(self.api_key_var.get())
+            if self.gemini_api_key_var.get().strip():
+                set_gemini_api_key(self.gemini_api_key_var.get())
+        except ControllerError as exc:
+            messagebox.showerror("Advanced Settings", str(exc), parent=window)
+            return
+        self.settings = settings
+        self._log("Advanced settings saved.")
+        window.destroy()
 
     def browse_key(self) -> None:
         path = filedialog.askopenfilename(title="Select SSH private key", initialdir=str(Path.home() / ".ssh"))
@@ -374,6 +632,13 @@ class SeedVCApp:
             ssh_port = int(self.port_var.get())
         except ValueError as exc:
             raise ControllerError("SSH port must be a number") from exc
+        try:
+            gpu_min = int(self.gpu_min_var.get())
+            gpu_max = int(self.gpu_max_var.get())
+        except ValueError as exc:
+            raise ControllerError("GPU VRAM limits must be whole numbers") from exc
+        if gpu_min <= 0 or gpu_max < gpu_min:
+            raise ControllerError("GPU VRAM limits must be a valid range")
         return Settings(
             input_device=input_device,
             output_device=output_device,
@@ -387,10 +652,18 @@ class SeedVCApp:
                 else ""
             ),
             ssh_key=key_value,
+            network_volume_id=self.network_volume_var.get().strip(),
             local_port=8042,
             stop_pod_on_exit=self.stop_on_exit_var.get(),
             reference_file=self.reference_file_var.get().strip(),
             active_reference=self.active_reference_var.get(),
+            gemini_autopilot_enabled=self.autopilot_var.get(),
+            gemini_cli_path=self.gemini_cli_var.get().strip() or "gemini",
+            gpu_vram_min_gb=gpu_min,
+            gpu_vram_max_gb=gpu_max,
+            gpu_selection="cheapest",
+            replacement_policy="delete_old_after_verified",
+            terminal_output_mode="summarized",
         )
 
     def _resolve_connection(self, settings: Settings, api_key: str) -> tuple[str, int]:
@@ -400,7 +673,8 @@ class SeedVCApp:
             # advertise an old direct-TCP mapping after a restart. Prefer the
             # last discovered endpoint only while it is demonstrably reachable.
             if (
-                settings.ssh_pod_id == settings.pod_id
+                not settings.network_volume_id
+                and settings.ssh_pod_id == settings.pod_id
                 and host
                 and tcp_open(host, port, timeout=1.0)
             ):
@@ -410,11 +684,48 @@ class SeedVCApp:
                 )
                 return host, port
             api = RunPodAPI(api_key)
-            connection = pod_connection(api.get_pod(settings.pod_id))
+            pod_id = settings.pod_id
+            if settings.network_volume_id:
+                self._event(
+                    "log",
+                    (
+                        f"Discovering RunPod attached to volume {settings.network_volume_id}...",
+                        "info",
+                    ),
+                )
+                pod = api.preferred_pod_for_network_volume(
+                    settings.network_volume_id,
+                    settings.gpu_vram_min_gb,
+                    settings.gpu_vram_max_gb,
+                )
+                pod_id = str(pod.get("id") or "")
+                if not pod_id:
+                    raise ControllerError("RunPod API returned a pod without an ID")
+                self._event("pod_id", pod_id)
+            else:
+                if not pod_id:
+                    raise ControllerError("Network volume ID or Pod ID is required")
+                pod = api.get_pod(pod_id)
+            expected_public_key = public_key_for_private(settings.ssh_key)
+            pod_environment = pod.get("env") or {}
+            installed_public_key = (
+                str(pod_environment.get("PUBLIC_KEY") or "").strip()
+                if isinstance(pod_environment, dict)
+                else ""
+            )
+            if installed_public_key != expected_public_key:
+                self._event(
+                    "log",
+                    ("Installing the configured SSH public key on the Pod...", "info"),
+                )
+                api.configure_public_key(pod_id, expected_public_key)
+                pod = api.get_pod(pod_id)
+
+            connection = pod_connection(pod)
             if connection is None:
                 self._event("status", ("pod", "Starting", "busy"))
                 self._event("log", ("Starting or resuming the RunPod pod…", "info"))
-                api.start_pod(settings.pod_id)
+                api.start_pod(pod_id)
             else:
                 self._event(
                     "log",
@@ -422,7 +733,7 @@ class SeedVCApp:
                 )
             try:
                 connection = api.wait_for_ssh(
-                    settings.pod_id,
+                    pod_id,
                     timeout=60 if connection is not None else 300,
                     progress=lambda line: self._event("log", (line, "info")),
                 )
@@ -432,20 +743,20 @@ class SeedVCApp:
                     ("SSH stayed unavailable; restarting the pod once…", "warning"),
                 )
                 self._event("status", ("pod", "Restarting", "busy"))
-                api.restart_pod(settings.pod_id)
+                api.restart_pod(pod_id)
                 connection = api.wait_for_ssh(
-                    settings.pod_id,
+                    pod_id,
                     progress=lambda line: self._event("log", (line, "info")),
                 )
             host, port = connection.host, connection.ssh_port
-            self._event("connection", (host, port, settings.pod_id))
+            self._event("connection", (host, port, pod_id))
         return host, port
 
     def configure_pod_ssh(self) -> None:
         try:
             settings = self._current_settings()
-            if not settings.manage_pod or not settings.pod_id:
-                raise ControllerError("Enable RunPod automation and enter a Pod ID first")
+            if not settings.manage_pod or not (settings.network_volume_id or settings.pod_id):
+                raise ControllerError("Enter the RunPod network volume ID first")
             api_key = self.api_key_var.get().strip()
             if not api_key:
                 raise ControllerError("RunPod API key is required")
@@ -465,15 +776,22 @@ class SeedVCApp:
         def worker() -> None:
             try:
                 api = RunPodAPI(api_key)
+                pod_id = settings.pod_id
+                if settings.network_volume_id:
+                    pod = api.preferred_pod_for_network_volume(settings.network_volume_id)
+                    pod_id = str(pod.get("id") or "")
+                    self._event("pod_id", pod_id)
+                if not pod_id:
+                    raise ControllerError("RunPod API returned no pod to configure")
                 self._event("log", ("Installing the selected SSH public key on the Pod…", "info"))
-                api.configure_public_key(settings.pod_id, public_key)
+                api.configure_public_key(pod_id, public_key)
                 connection = api.wait_for_ssh(
-                    settings.pod_id,
+                    pod_id,
                     timeout=300,
                     progress=lambda line: self._event("log", (line, "info")),
                 )
                 self._event(
-                    "connection", (connection.host, connection.ssh_port, settings.pod_id)
+                    "connection", (connection.host, connection.ssh_port, pod_id)
                 )
                 self._event("status", ("pod", "Online", "ok"))
                 self._event("log", ("Pod SSH key is configured and reachable.", "info"))
@@ -508,8 +826,8 @@ class SeedVCApp:
         try:
             settings = self._current_settings()
             api_key = self.api_key_var.get().strip()
-            if settings.manage_pod and (not settings.pod_id or not api_key):
-                raise ControllerError("Pod ID and RunPod API key are required")
+            if settings.manage_pod and (not (settings.network_volume_id or settings.pod_id) or not api_key):
+                raise ControllerError("Network volume ID and RunPod API key are required")
             if not settings.manage_pod:
                 ssh_base_command(settings.ssh_host, settings.ssh_port, settings.ssh_key)
         except ControllerError as exc:
@@ -537,8 +855,8 @@ class SeedVCApp:
             save_settings(settings)
             if settings.manage_pod:
                 set_api_key(self.api_key_var.get())
-                if not settings.pod_id:
-                    raise ControllerError("Pod ID is required for RunPod automation")
+                if not (settings.network_volume_id or settings.pod_id):
+                    raise ControllerError("Network volume ID is required for RunPod automation")
             else:
                 ssh_base_command(settings.ssh_host, settings.ssh_port, settings.ssh_key)
         except ControllerError as exc:
@@ -556,27 +874,62 @@ class SeedVCApp:
         ).start()
 
     def _start_worker(self, settings: Settings, api_key: str) -> None:
+        pod_connected = False
         try:
-            host, port = self._resolve_connection(settings, api_key)
+            try:
+                host, port = self._resolve_connection(settings, api_key)
+            except ControllerError as exc:
+                if not self._should_run_autopilot(settings, str(exc)):
+                    raise
+                self._event("status", ("pod", "Autopilot", "busy"))
+                self._event(
+                    "log",
+                    ("Gemini Autopilot is taking over RunPod recovery...", "warning"),
+                )
+                if not self._run_gemini_autopilot(settings, api_key, str(exc)):
+                    return
+                self._event(
+                    "log",
+                    ("Recovery completed; connecting to the recovered Pod...", "info"),
+                )
+                host, port = self._resolve_connection(settings, api_key)
+            pod_connected = True
             self._event("status", ("pod", "Online", "ok"))
 
             self._event("status", ("server", "Starting", "busy"))
             self._event("log", ("Checking the Fast-VC service on the pod…", "info"))
             command = ssh_base_command(host, port, settings.ssh_key) + [REMOTE_START_COMMAND]
-            result = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=480,
-                creationflags=CREATE_FLAGS,
-            )
-            for line in result.stdout.splitlines():
-                self._event("log", (f"pod: {line}", "info"))
-            if result.returncode:
-                raise ControllerError(f"pod service startup failed (SSH exit {result.returncode})")
+            for attempt in range(1, 3):
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=CREATE_FLAGS,
+                )
+                self._read_process_async(process, "pod")
+                try:
+                    returncode = process.wait(timeout=480)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise ControllerError("pod service startup timed out after 8 minutes")
+                if returncode == 0:
+                    break
+                if attempt == 1:
+                    self._event(
+                        "log",
+                        ("SeedVC startup failed once; retrying on the same Pod...", "warning"),
+                    )
+            if returncode:
+                raise ControllerError(
+                    f"pod service startup failed twice (SSH exit {returncode})"
+                )
             self._event("status", ("server", "Ready", "ok"))
             try:
                 self._load_voice_library_remote(host, port, settings.ssh_key)
@@ -606,6 +959,7 @@ class SeedVCApp:
                     and self.tunnel_process.poll() is None,
                 )
             self._event("status", ("tunnel", "Connected", "ok"))
+            self._finalize_autopilot_replacement(api_key)
 
             input_device, output_device = settings.input_device, settings.output_device
             assert input_device is not None and output_device is not None
@@ -639,10 +993,376 @@ class SeedVCApp:
                 raise ControllerError(f"Windows audio client exited with code {code}")
         except subprocess.TimeoutExpired as exc:
             self._event("error", f"Timed out while starting the pod service: {exc}")
-        except (ControllerError, OSError) as exc:
+        except ControllerError as exc:
+            if pod_connected:
+                self._event(
+                    "log",
+                    ("Keeping the reachable Pod online for recovery and retry.", "warning"),
+                )
+            else:
+                self._rollback_autopilot_replacement(api_key)
+            self._event("error", str(exc))
+        except OSError as exc:
             self._event("error", str(exc))
         finally:
             self._event("finished", None)
+
+    def _should_run_autopilot(self, settings: Settings, message: str) -> bool:
+        if not settings.gemini_autopilot_enabled:
+            return False
+        lower = message.casefold()
+        triggers = (
+            "not enough free gpus",
+            "no runpod pod is attached",
+            "no compatible runpod pod",
+            "pod ssh did not become reachable",
+            "failed to start",
+            "capacity",
+        )
+        return any(trigger in lower for trigger in triggers)
+
+    def _gemini_command(self, settings: Settings, prompt: str | None = None) -> list[str]:
+        configured = settings.gemini_cli_path.strip() or "gemini"
+        resolved = shutil.which(configured)
+        if not resolved and configured.casefold() == "gemini":
+            resolved = shutil.which("gemini.cmd") or shutil.which("gemini.ps1")
+        cli = resolved or configured
+        return [
+            cli,
+            "--model",
+            GEMINI_AUTOPILOT_MODEL,
+            "--approval-mode",
+            "yolo",
+            "--prompt",
+            prompt or self._gemini_autopilot_prompt(settings, []),
+        ]
+
+    def _gemini_autopilot_prompt(
+        self,
+        settings: Settings,
+        candidates: list[dict],
+    ) -> str:
+        compact_candidates = [
+            {
+                "id": candidate.get("id"),
+                "name": candidate.get("displayName"),
+                "vram_gb": candidate.get("memoryInGb"),
+                "hourly_price": (candidate.get("lowestPrice") or {}).get(
+                    "uninterruptablePrice"
+                ),
+            }
+            for candidate in candidates
+        ]
+        return (
+            "You are choosing GPU fallback priority for an autonomous SeedVC RunPod "
+            "recovery. The controller has already queried RunPod, filtered the catalog, "
+            "and will enforce all policy and execute the deployment. Do not use tools. "
+            f"All candidates are NVIDIA GPUs with {settings.gpu_vram_min_gb}-"
+            f"{settings.gpu_vram_max_gb} GB VRAM and support the volume's cloud type. "
+            "Prefer the lowest hourly price, using stronger hardware only as a tie-breaker. "
+            "Select exactly one candidate. Return one JSON object and no markdown or "
+            'explanation: {"selected_gpu_type_id":"exact supplied id"}.\n'
+            f"Candidates: {json.dumps(compact_candidates, separators=(',', ':'))}"
+        )
+
+    def _prepare_gemini_auth_env(self, env: dict[str, str]) -> None:
+        appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        home = appdata / "SeedVC" / "gemini-autopilot-home"
+        gemini_dir = home / ".gemini"
+        gemini_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = gemini_dir / "settings.json"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "selectedAuthType": "gemini-api-key",
+                    "model": GEMINI_AUTOPILOT_MODEL,
+                    "coreTools": [],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        system_settings = home / "system-settings.json"
+        system_settings.write_text("{}", encoding="utf-8")
+
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["GEMINI_DEFAULT_AUTH_TYPE"] = "gemini-api-key"
+        env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(system_settings)
+        env.pop("GOOGLE_GENAI_USE_GCA", None)
+        env.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+        env.pop("GOOGLE_CLOUD_PROJECT", None)
+        env.pop("GOOGLE_CLOUD_LOCATION", None)
+        env["SEEDVC_AUTOPILOT_WORKDIR"] = str(self._autopilot_workdir())
+
+    def _autopilot_workdir(self) -> Path:
+        appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        workdir = appdata / "SeedVC" / "gemini-autopilot-work"
+        workdir.mkdir(parents=True, exist_ok=True)
+        return workdir
+
+    @staticmethod
+    def _parse_autopilot_decision(output: str) -> list[str]:
+        decoder = json.JSONDecoder()
+        for offset, character in enumerate(output):
+            if character != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(output[offset:])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(value, dict):
+                continue
+            selected = value.get("selected_gpu_type_id")
+            if isinstance(selected, str) and selected.strip():
+                return [selected.strip()]
+            ordered = value.get("ordered_gpu_type_ids")
+            if isinstance(ordered, list) and all(
+                isinstance(item, str) and item.strip() for item in ordered
+            ):
+                return [item.strip() for item in ordered]
+        raise ControllerError("Gemini did not return a valid GPU priority decision")
+
+    @staticmethod
+    def _replacement_payload(
+        source: dict,
+        volume: dict,
+        ordered_gpu_ids: list[str],
+        public_key: str,
+    ) -> dict:
+        environment = dict(source.get("env") or {})
+        environment["PUBLIC_KEY"] = public_key
+        ports = [
+            port
+            for port in (source.get("ports") or [])
+            if not str(port).startswith("22/")
+        ]
+        ports = list(dict.fromkeys([*ports, "22/tcp"]))
+        return {
+            "name": "seedvc-autopilot",
+            "imageName": source.get("imageName"),
+            "cloudType": "SECURE" if source.get("secureCloud", True) else "COMMUNITY",
+            "gpuCount": int(source.get("gpuCount") or 1),
+            "gpuTypeIds": ordered_gpu_ids,
+            "gpuTypePriority": "custom",
+            "containerDiskInGb": int(source.get("containerDiskInGb") or 30),
+            "networkVolumeId": volume.get("id"),
+            "volumeMountPath": source.get("volumeMountPath") or "/workspace",
+            "dataCenterIds": [volume.get("dataCenterId")],
+            "dataCenterPriority": "custom",
+            "ports": ports,
+            "supportPublicIp": True,
+            "env": environment,
+        }
+
+    def _run_gemini_autopilot(self, settings: Settings, api_key: str, failure: str) -> bool:
+        gemini_key = self.gemini_api_key_var.get().strip()
+        if not gemini_key:
+            self._event(
+                "soft_error",
+                "Gemini Autopilot is enabled, but the Gemini API key is not set in Advanced Settings.",
+            )
+            return False
+        if not api_key.strip():
+            self._event(
+                "soft_error",
+                "Gemini Autopilot needs the RunPod API key in Advanced Settings.",
+            )
+            return False
+        try:
+            api = RunPodAPI(api_key)
+            source = api.preferred_pod_for_network_volume(settings.network_volume_id)
+            source_id = str(source.get("id") or "")
+            source.update(api.pod_gpu_details().get(source_id, {}))
+            volume = api.get_network_volume(settings.network_volume_id)
+            secure_cloud = bool(source.get("secureCloud", True))
+            candidates = [
+                candidate
+                for candidate in api.gpu_types()
+                if str(candidate.get("id") or "").startswith("NVIDIA ")
+                and gpu_candidate_allowed(
+                    candidate,
+                    settings.gpu_vram_min_gb,
+                    settings.gpu_vram_max_gb,
+                )
+                and gpu_runtime_compatible(candidate, str(source.get("imageName") or ""))
+                and bool(candidate.get("secureCloud") if secure_cloud else candidate.get("communityCloud"))
+                and (candidate.get("lowestPrice") or {}).get("uninterruptablePrice") is not None
+            ]
+            candidates = sort_gpu_candidates(candidates)
+            if not candidates:
+                raise ControllerError("RunPod reported no in-policy GPU types with current availability")
+            prompt = self._gemini_autopilot_prompt(settings, candidates)
+            command = self._gemini_command(settings, prompt)
+            env = os.environ.copy()
+            env["GEMINI_API_KEY"] = gemini_key
+            self._prepare_gemini_auth_env(env)
+            safe_failure = redact_secrets(failure, api_key, gemini_key)
+            self._event("log", (f"Autopilot trigger: {safe_failure}", "warning"))
+            self._event(
+                "log",
+                (f"Gemini is ranking {len(candidates)} policy-approved GPU types...", "info"),
+            )
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(self._autopilot_workdir()),
+                env=env,
+                creationflags=CREATE_FLAGS,
+            )
+            assert process.stdout is not None
+            output_lines: list[str] = []
+            for raw_line in process.stdout:
+                line = redact_secrets(raw_line.strip(), api_key, gemini_key)
+                if not line:
+                    continue
+                output_lines.append(line)
+                lower = line.casefold()
+                level = "error" if "failed" in lower or "error" in lower else "info"
+                self._event("log", (f"gemini: {line}", level))
+            code = process.wait()
+            if code:
+                self._event("soft_error", f"Gemini Autopilot exited with code {code}")
+                return False
+            selected_gpu_ids = self._parse_autopilot_decision("\n".join(output_lines))
+            allowed_by_id = {str(candidate.get("id")): candidate for candidate in candidates}
+            if len(selected_gpu_ids) != 1:
+                raise ControllerError("Gemini returned an invalid GPU choice")
+            selected_gpu_id = selected_gpu_ids[0]
+            if selected_gpu_id in allowed_by_id:
+                ordered_gpu_ids = [selected_gpu_id] + [
+                    candidate_id
+                    for candidate_id in allowed_by_id
+                    if candidate_id != selected_gpu_id
+                ]
+            else:
+                self._event(
+                    "log",
+                    (
+                        "Gemini's preferred GPU is no longer available; using the "
+                        "current policy-approved price order.",
+                        "warning",
+                    ),
+                )
+                ordered_gpu_ids = list(allowed_by_id)
+            self._event(
+                "log",
+                (f"Deploying Gemini's first available choice: {ordered_gpu_ids[0]}", "info"),
+            )
+            replacement_id = ""
+            connection = None
+            last_deployment_error = "RunPod had no usable capacity"
+            public_key = public_key_for_private(settings.ssh_key)
+            for gpu_type_id in ordered_gpu_ids:
+                candidate_id = ""
+                self._event("log", (f"Trying {gpu_type_id}...", "info"))
+                try:
+                    payload = self._replacement_payload(
+                        source,
+                        volume,
+                        [gpu_type_id],
+                        public_key,
+                    )
+                    replacement = api.create_pod(payload)
+                    candidate_id = str(replacement.get("id") or "")
+                    if not candidate_id:
+                        raise ControllerError(
+                            "RunPod created a replacement without returning its ID"
+                        )
+                    status = str(
+                        replacement.get("desiredStatus")
+                        or replacement.get("status")
+                        or ""
+                    ).upper()
+                    if status in {"EXITED", "STOPPED"}:
+                        api.start_pod(candidate_id)
+                    candidate_connection = api.wait_for_ssh(
+                        candidate_id,
+                        timeout=300,
+                        progress=lambda line: self._event("log", (line, "info")),
+                    )
+                    verified = api.get_pod(candidate_id)
+                    verified.update(api.pod_gpu_details().get(candidate_id, {}))
+                    if not gpu_candidate_allowed(
+                        verified,
+                        settings.gpu_vram_min_gb,
+                        settings.gpu_vram_max_gb,
+                    ):
+                        api.stop_pod(candidate_id)
+                        api.delete_pod(candidate_id)
+                        raise ControllerError(
+                            "RunPod provisioned a replacement outside the GPU VRAM policy"
+                        )
+                    replacement_id = candidate_id
+                    connection = candidate_connection
+                    break
+                except ControllerError as exc:
+                    last_deployment_error = str(exc)
+                    if candidate_id:
+                        try:
+                            api.stop_pod(candidate_id)
+                            api.delete_pod(candidate_id)
+                        except ControllerError:
+                            pass
+                    self._event(
+                        "log",
+                        (f"{gpu_type_id} was unavailable; trying the next candidate.", "warning"),
+                    )
+            if not replacement_id or connection is None:
+                raise ControllerError(
+                    f"all policy-approved GPU deployment attempts failed: "
+                    f"{last_deployment_error}"
+                )
+            self._event("pod_id", replacement_id)
+            self._event("log", (f"Replacement pod created: {replacement_id}", "info"))
+            self._event(
+                "connection",
+                (connection.host, connection.ssh_port, replacement_id),
+            )
+            self.autopilot_replacement_pod_id = replacement_id
+            if settings.replacement_policy == "delete_old_after_verified":
+                self.pending_replaced_pod_id = source_id
+            self._event("log", ("Gemini Autopilot recovery verified over SSH.", "info"))
+            return True
+        except OSError as exc:
+            self._event("soft_error", f"Could not launch Gemini CLI: {exc}")
+        except ControllerError as exc:
+            self._event("soft_error", str(exc))
+        return False
+
+    def _finalize_autopilot_replacement(self, api_key: str) -> None:
+        old_pod_id = self.pending_replaced_pod_id
+        replacement_id = self.autopilot_replacement_pod_id
+        if not old_pod_id or old_pod_id == replacement_id:
+            return
+        RunPodAPI(api_key).delete_pod(old_pod_id)
+        self._event(
+            "log",
+            (f"SeedVC is ready; deleted replaced pod {old_pod_id}.", "info"),
+        )
+        self.pending_replaced_pod_id = ""
+        self.autopilot_replacement_pod_id = ""
+
+    def _rollback_autopilot_replacement(self, api_key: str) -> None:
+        replacement_id = self.autopilot_replacement_pod_id
+        if not replacement_id or not api_key:
+            return
+        api = RunPodAPI(api_key)
+        try:
+            api.stop_pod(replacement_id)
+            api.delete_pod(replacement_id)
+            self._event(
+                "log",
+                (f"Removed failed replacement pod {replacement_id}; old pod retained.", "warning"),
+            )
+        except ControllerError as exc:
+            self._event("log", (f"Could not clean failed replacement: {exc}", "warning"))
+        self.pending_replaced_pod_id = ""
+        self.autopilot_replacement_pod_id = ""
 
     def upload_reference(self) -> None:
         if self.uploading:
@@ -651,8 +1371,8 @@ class SeedVCApp:
             reference = validate_reference_file(self.reference_file_var.get())
             settings = self._current_settings()
             if settings.manage_pod:
-                if not settings.pod_id or not self.api_key_var.get().strip():
-                    raise ControllerError("Pod ID and RunPod API key are required")
+                if not (settings.network_volume_id or settings.pod_id) or not self.api_key_var.get().strip():
+                    raise ControllerError("Network volume ID and RunPod API key are required")
             else:
                 ssh_base_command(settings.ssh_host, settings.ssh_port, settings.ssh_key)
         except ControllerError as exc:
@@ -757,8 +1477,8 @@ class SeedVCApp:
         try:
             settings = self._current_settings()
             api_key = self.api_key_var.get().strip()
-            if settings.manage_pod and (not settings.pod_id or not api_key):
-                raise ControllerError("Pod ID and RunPod API key are required")
+            if settings.manage_pod and (not (settings.network_volume_id or settings.pod_id) or not api_key):
+                raise ControllerError("Network volume ID and RunPod API key are required")
             if not settings.manage_pod:
                 ssh_base_command(settings.ssh_host, settings.ssh_port, settings.ssh_key)
         except ControllerError as exc:
@@ -915,8 +1635,8 @@ class SeedVCApp:
         self._set_status("tunnel", "Off", "off")
 
     def stop_pod(self) -> None:
-        if not self.pod_id_var.get().strip() or not self.api_key_var.get().strip():
-            messagebox.showinfo("Stop RunPod", "Enter the Pod ID and RunPod API key first.")
+        if not (self.pod_id_var.get().strip() or self.network_volume_var.get().strip()) or not self.api_key_var.get().strip():
+            messagebox.showinfo("Stop RunPod", "Enter the network volume ID and RunPod API key first.")
             return
         if not messagebox.askyesno(
             "Stop RunPod", "Stop the GPU pod now? The voice connection will end."
@@ -925,10 +1645,19 @@ class SeedVCApp:
         self.stop_voice()
         api_key = self.api_key_var.get().strip()
         pod_id = self.pod_id_var.get().strip()
+        network_volume_id = self.network_volume_var.get().strip()
 
         def worker() -> None:
             try:
-                RunPodAPI(api_key).stop_pod(pod_id)
+                api = RunPodAPI(api_key)
+                target_pod_id = pod_id
+                if network_volume_id:
+                    pod = api.preferred_pod_for_network_volume(network_volume_id)
+                    target_pod_id = str(pod.get("id") or "")
+                    self._event("pod_id", target_pod_id)
+                if not target_pod_id:
+                    raise ControllerError("RunPod API returned no pod to stop")
+                api.stop_pod(target_pod_id)
                 self._event("status", ("pod", "Stopped", "off"))
                 self._event("log", ("RunPod stop request accepted.", "info"))
             except ControllerError as exc:
@@ -951,11 +1680,17 @@ class SeedVCApp:
                     self._set_status(key, text, state)
                 elif name == "connection":
                     host, port, pod_id = value  # type: ignore[misc]
+                    self.pod_id_var.set(pod_id)
                     self.host_var.set(host)
                     self.port_var.set(str(port))
+                    self.settings.pod_id = pod_id
                     self.settings.ssh_host = host
                     self.settings.ssh_port = port
                     self.settings.ssh_pod_id = pod_id
+                elif name == "pod_id":
+                    pod_id = str(value)
+                    self.pod_id_var.set(pod_id)
+                    self.settings.pod_id = pod_id
                 elif name == "voice_library":
                     voices, active_id = value  # type: ignore[misc]
                     counts: dict[str, int] = {}
@@ -981,6 +1716,9 @@ class SeedVCApp:
                     self._log(str(value), "error")
                     if not self.closing:
                         messagebox.showerror("SeedVC", str(value))
+                elif name == "soft_error":
+                    self._log(str(value), "error")
+                    self._set_status("pod", "Autopilot failed", "error")
                 elif name == "finished":
                     self._finish_state()
                 elif name == "reference_done":
@@ -1009,7 +1747,9 @@ class SeedVCApp:
                 elif name == "refresh_voices_finished":
                     self.refresh_voices_button.configure(state="normal")
                 elif name == "configure_ssh_finished":
-                    self.configure_ssh_button.configure(state="normal")
+                    button = getattr(self, "configure_ssh_button", None)
+                    if button is not None and button.winfo_exists():
+                        button.configure(state="normal")
                 elif name == "buttons":
                     enabled = bool(value)
                     self.local_button.configure(state="normal" if enabled else "disabled")
@@ -1040,6 +1780,13 @@ class SeedVCApp:
             self.start_button.configure(state="normal")
             self.local_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
+
+    def _set_status(self, key: str, text: str, state: str) -> None:
+        colors = {"ok": "#15803d", "busy": "#b45309", "error": "#b91c1c", "off": "#777777"}
+        prefix = {"ok": "Ready", "busy": "Working", "error": "Error", "off": "Off"}.get(state, "State")
+        self.status_labels[key].configure(
+            text=f"{prefix}: {text}", foreground=colors.get(state, "#777777")
+        )
 
     def on_close(self) -> None:
         self.closing = True

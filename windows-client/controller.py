@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import json
 import os
 from pathlib import Path
 import shlex
 import socket
 import time
+import re
 from typing import Callable
 from urllib import error, request
 
@@ -16,7 +18,10 @@ from urllib import error, request
 APP_NAME = "SeedVC"
 CREDENTIAL_SERVICE = "SeedVC RunPod"
 CREDENTIAL_USERNAME = "api-key"
+GEMINI_CREDENTIAL_SERVICE = "SeedVC Gemini"
+GEMINI_CREDENTIAL_USERNAME = "api-key"
 RUNPOD_API_BASE = "https://rest.runpod.io/v1"
+RUNPOD_GRAPHQL_URL = "https://api.runpod.io/graphql"
 MAX_REFERENCE_BYTES = 100 * 1024 * 1024
 REFERENCE_EXTENSIONS = {
     ".aac",
@@ -42,15 +47,23 @@ class Settings:
     input_device: int | None = None
     output_device: int | None = None
     pod_id: str = ""
-    manage_pod: bool = False
+    manage_pod: bool = True
     ssh_host: str = ""
     ssh_port: int = 22
     ssh_pod_id: str = ""
     ssh_key: str = ""
+    network_volume_id: str = ""
     local_port: int = 8042
     stop_pod_on_exit: bool = False
     reference_file: str = ""
     active_reference: str = "Saudi Arabic (bundled)"
+    gemini_autopilot_enabled: bool = True
+    gemini_cli_path: str = "gemini"
+    gpu_vram_min_gb: int = 16
+    gpu_vram_max_gb: int = 48
+    gpu_selection: str = "cheapest"
+    replacement_policy: str = "delete_old_after_verified"
+    terminal_output_mode: str = "summarized"
 
 
 @dataclass(frozen=True)
@@ -115,6 +128,94 @@ def set_api_key(api_key: str) -> None:
         raise ControllerError(f"could not save to Windows Credential Manager: {exc}") from exc
 
 
+def get_gemini_api_key() -> str:
+    try:
+        import keyring
+
+        return keyring.get_password(GEMINI_CREDENTIAL_SERVICE, GEMINI_CREDENTIAL_USERNAME) or ""
+    except Exception as exc:  # platform credential backends vary
+        raise ControllerError(f"could not read Windows Credential Manager: {exc}") from exc
+
+
+def set_gemini_api_key(api_key: str) -> None:
+    if not api_key.strip():
+        raise ControllerError("Gemini API key is empty")
+    try:
+        import keyring
+
+        keyring.set_password(
+            GEMINI_CREDENTIAL_SERVICE, GEMINI_CREDENTIAL_USERNAME, api_key.strip()
+        )
+    except Exception as exc:
+        raise ControllerError(f"could not save to Windows Credential Manager: {exc}") from exc
+
+
+def redact_secrets(text: str, *secrets: str) -> str:
+    redacted = text
+    for secret in secrets:
+        value = secret.strip()
+        if len(value) >= 6:
+            redacted = redacted.replace(value, "[redacted]")
+    return redacted
+
+
+def gpu_candidate_allowed(candidate: dict, min_vram_gb: int = 16, max_vram_gb: int = 48) -> bool:
+    gpu_type = candidate.get("gpuType") or {}
+    machine = candidate.get("machine") or {}
+    machine_gpu_type = machine.get("gpuType") or {} if isinstance(machine, dict) else {}
+    raw_vram = candidate.get("gpuMemoryInGb")
+    if raw_vram is None and isinstance(gpu_type, dict):
+        raw_vram = gpu_type.get("memoryInGb")
+    if raw_vram is None and isinstance(machine_gpu_type, dict):
+        raw_vram = machine_gpu_type.get("memoryInGb")
+    if raw_vram is None and "networkVolumeId" not in candidate:
+        raw_vram = (
+            candidate.get("memoryInGb")
+            or candidate.get("vramGb")
+            or candidate.get("vram_gb")
+            or candidate.get("memory")
+        )
+    try:
+        vram = float(raw_vram)
+    except (TypeError, ValueError):
+        return False
+    return min_vram_gb <= vram <= max_vram_gb
+
+
+def sort_gpu_candidates(candidates: list[dict]) -> list[dict]:
+    def key(candidate: dict) -> tuple[float, str]:
+        lowest_price = candidate.get("lowestPrice") or {}
+        raw_price = (
+            candidate.get("securePrice")
+            or candidate.get("communityPrice")
+            or candidate.get("price")
+            or candidate.get("costPerHr")
+            or (
+                lowest_price.get("uninterruptablePrice")
+                if isinstance(lowest_price, dict)
+                else None
+            )
+        )
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            price = float("inf")
+        return price, str(candidate.get("id") or candidate.get("name") or "")
+
+    return sorted(candidates, key=key)
+
+
+def gpu_runtime_compatible(candidate: dict, image_name: str) -> bool:
+    gpu_id = str(candidate.get("id") or candidate.get("gpuTypeId") or "").casefold()
+    requires_cuda_128 = "blackwell" in gpu_id or "rtx 50" in gpu_id
+    if not requires_cuda_128:
+        return True
+    match = re.search(r"cuda(\d+)\.(\d+)", image_name.casefold())
+    if not match:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= (12, 8)
+
+
 class RunPodAPI:
     """Small client for the supported RunPod REST Pod endpoints."""
 
@@ -130,6 +231,7 @@ class RunPodAPI:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 SeedVC-Windows-Client/1.0",
         }
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -144,6 +246,11 @@ class RunPodAPI:
                 body = response.read()
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
+            if "cloudflare" in detail.casefold() or "error 1010" in detail.casefold():
+                raise ControllerError(
+                    "RunPod blocked the API request at Cloudflare. "
+                    "The app now sends a browser-like user agent; try again."
+                ) from exc
             raise ControllerError(f"RunPod API returned HTTP {exc.code}: {detail}") from exc
         except (error.URLError, TimeoutError, OSError) as exc:
             raise ControllerError(f"could not reach RunPod API: {exc}") from exc
@@ -153,12 +260,111 @@ class RunPodAPI:
             result = json.loads(body)
         except json.JSONDecodeError as exc:
             raise ControllerError("RunPod API returned invalid JSON") from exc
-        if not isinstance(result, dict):
+        if not isinstance(result, (dict, list)):
             raise ControllerError("RunPod API returned an unexpected response")
         return result
 
+    def _graphql(self, query: str) -> dict:
+        body = json.dumps({"query": query}).encode("utf-8")
+        req = request.Request(
+            RUNPOD_GRAPHQL_URL,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 SeedVC-Windows-Client/1.0",
+            },
+            data=body,
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout) as response:
+                result = json.loads(response.read())
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            raise ControllerError(
+                f"RunPod GraphQL returned HTTP {exc.code}: {detail}"
+            ) from exc
+        except (error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise ControllerError(f"could not query RunPod GPU metadata: {exc}") from exc
+        if not isinstance(result, dict) or result.get("errors"):
+            raise ControllerError(
+                f"RunPod GraphQL returned an error: {json.dumps(result.get('errors'))}"
+            )
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise ControllerError("RunPod GraphQL returned an unexpected response")
+        return data
+
+    def pod_gpu_details(self) -> dict[str, dict]:
+        data = self._graphql(
+            "query { myself { pods { id machine { secureCloud gpuTypeId "
+            "gpuDisplayName gpuType { id displayName memoryInGb } } } } }"
+        )
+        myself = data.get("myself") or {}
+        pods = myself.get("pods") or [] if isinstance(myself, dict) else []
+        details: dict[str, dict] = {}
+        for pod in pods:
+            if not isinstance(pod, dict) or not pod.get("id"):
+                continue
+            machine = pod.get("machine") or {}
+            gpu_type = machine.get("gpuType") or {} if isinstance(machine, dict) else {}
+            details[str(pod["id"])] = {
+                "gpuTypeId": machine.get("gpuTypeId") if isinstance(machine, dict) else None,
+                "gpuDisplayName": machine.get("gpuDisplayName") if isinstance(machine, dict) else None,
+                "gpuMemoryInGb": gpu_type.get("memoryInGb") if isinstance(gpu_type, dict) else None,
+                "secureCloud": machine.get("secureCloud") if isinstance(machine, dict) else None,
+            }
+        return details
+
+    def gpu_types(self) -> list[dict]:
+        data = self._graphql(
+            "query { gpuTypes { id displayName memoryInGb secureCloud communityCloud "
+            "lowestPrice(input: {gpuCount: 1}) { uninterruptablePrice } } }"
+        )
+        gpu_types = data.get("gpuTypes") or []
+        if not isinstance(gpu_types, list):
+            raise ControllerError("RunPod returned an unexpected GPU catalog")
+        return [item for item in gpu_types if isinstance(item, dict)]
+
+    def get_network_volume(self, network_volume_id: str) -> dict:
+        return self._request("GET", f"/networkvolumes/{network_volume_id}")
+
+    def runtime_ssh_connection(self, pod_id: str) -> PodConnection | None:
+        escaped_pod_id = json.dumps(pod_id)
+        query = (
+            "query { pod(input: {podId: "
+            + escaped_pod_id
+            + "}) { runtime { ports { ip isIpPublic privatePort publicPort type } } } }"
+        )
+        data = self._graphql(query)
+        pod = data.get("pod") or {}
+        runtime = pod.get("runtime") or {} if isinstance(pod, dict) else {}
+        ports = runtime.get("ports") or [] if isinstance(runtime, dict) else []
+        for port in ports:
+            if not isinstance(port, dict):
+                continue
+            if (
+                port.get("privatePort") == 22
+                and str(port.get("type") or "").casefold() == "tcp"
+                and port.get("ip")
+                and port.get("publicPort")
+            ):
+                return PodConnection(str(port["ip"]), int(port["publicPort"]))
+        return None
+
     def get_pod(self, pod_id: str) -> dict:
         return self._request("GET", f"/pods/{pod_id}")
+
+    def list_pods(self) -> list[dict]:
+        result = self._request("GET", "/pods")
+        if isinstance(result, dict):
+            pods = result.get("pods") or result.get("data") or []
+        else:
+            pods = result
+        if not isinstance(pods, list):
+            raise ControllerError("RunPod API returned an unexpected pod list")
+        return [pod for pod in pods if isinstance(pod, dict)]
 
     def start_pod(self, pod_id: str) -> dict:
         return self._request("POST", f"/pods/{pod_id}/start")
@@ -168,6 +374,64 @@ class RunPodAPI:
 
     def restart_pod(self, pod_id: str) -> dict:
         return self._request("POST", f"/pods/{pod_id}/restart")
+
+    def delete_pod(self, pod_id: str) -> dict:
+        return self._request("DELETE", f"/pods/{pod_id}")
+
+    def create_pod(self, payload: dict) -> dict:
+        return self._request("POST", "/pods", payload)
+
+    def pods_for_network_volume(self, network_volume_id: str) -> list[dict]:
+        volume_id = network_volume_id.strip()
+        if not volume_id:
+            raise ControllerError("RunPod network volume ID is required")
+        return [
+            pod
+            for pod in self.list_pods()
+            if str(pod.get("networkVolumeId") or "") == volume_id
+        ]
+
+    def preferred_pod_for_network_volume(
+        self,
+        network_volume_id: str,
+        min_vram_gb: int | None = None,
+        max_vram_gb: int | None = None,
+    ) -> dict:
+        pods = self.pods_for_network_volume(network_volume_id)
+        if min_vram_gb is not None and max_vram_gb is not None:
+            gpu_details = self.pod_gpu_details()
+            pods = [dict(pod, **gpu_details.get(str(pod.get("id") or ""), {})) for pod in pods]
+            pods = [
+                pod
+                for pod in pods
+                if gpu_candidate_allowed(pod, min_vram_gb, max_vram_gb)
+            ]
+        if not pods:
+            if min_vram_gb is not None and max_vram_gb is not None:
+                raise ControllerError(
+                    f"no compatible RunPod pod attached to network volume "
+                    f"{network_volume_id} has {min_vram_gb}-{max_vram_gb} GB VRAM"
+                )
+            raise ControllerError(
+                f"no RunPod pod is attached to network volume {network_volume_id}"
+            )
+        statuses = {"RUNNING": 0, "STARTING": 1, "EXITED": 2, "STOPPED": 3}
+
+        def created_timestamp(pod: dict) -> float:
+            raw = str(pod.get("createdAt") or "")
+            for suffix in (" UTC", ""):
+                value = raw.removesuffix(suffix)
+                try:
+                    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f %z").timestamp()
+                except ValueError:
+                    pass
+            return 0.0
+
+        def key(pod: dict) -> tuple[int, float]:
+            status = str(pod.get("desiredStatus") or pod.get("status") or "").upper()
+            return statuses.get(status, 9), -created_timestamp(pod)
+
+        return sorted(pods, key=key)[0]
 
     def configure_public_key(self, pod_id: str, public_key: str) -> dict:
         key = public_key.strip()
@@ -191,6 +455,10 @@ class RunPodAPI:
             pod = self.get_pod(pod_id)
             last_status = str(pod.get("desiredStatus") or pod.get("status") or "starting")
             connection = pod_connection(pod)
+            if "22/udp" in (pod.get("ports") or []):
+                runtime_connection = self.runtime_ssh_connection(pod_id)
+                if runtime_connection is not None:
+                    connection = runtime_connection
             if connection and tcp_open(connection.host, connection.ssh_port, timeout=1.0):
                 if progress:
                     progress(
