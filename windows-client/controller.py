@@ -46,6 +46,10 @@ class ControllerError(RuntimeError):
 class Settings:
     input_device: int | None = None
     output_device: int | None = None
+    input_device_name: str = ""
+    input_hostapi: str = ""
+    output_device_name: str = ""
+    output_hostapi: str = ""
     pod_id: str = ""
     manage_pod: bool = True
     ssh_host: str = ""

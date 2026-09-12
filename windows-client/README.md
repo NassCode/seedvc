@@ -13,6 +13,7 @@ Run `setup-gui.bat` once, then double-click `run-gui.bat`. The controller:
 - starts or verifies Fast-VC-Service through SSH;
 - creates the private SSH tunnel;
 - starts and stops the tested audio client cleanly;
+- shows live microphone-input and converted-output peak meters in dBFS;
 - shows pod, server, tunnel, and voice status with a live activity log; and
 - can start, discover, and stop an existing RunPod Pod through the RunPod API.
 
@@ -51,6 +52,17 @@ the GUI settings file. RunPod's current REST endpoints are documented under
 The SSH host and port fields support a manual mode when API automation is not
 enabled. In both modes, select `CABLE Input` as the GUI playback device and
 `CABLE Output` as the microphone in the calling app.
+
+The device choice is saved by both its Windows audio API and device name. This
+keeps the selection stable when PortAudio numeric IDs change after a reboot or
+audio-device installation. For the lowest latency, prefer the Windows WASAPI
+entries for the physical microphone and `CABLE Input`.
+
+The two live meters isolate routing problems: **Microphone input** confirms that
+Windows is delivering physical-mic samples, while **Converted output to virtual
+mic** confirms that audio returned by SeedVC is being written to `CABLE Input`.
+If the first moves but the second does not, inspect the tunnel/server log. If
+both move but the calling app is silent, select `CABLE Output` in that app.
 
 The sections below document the underlying command-line workflow and remain
 useful for diagnostics.

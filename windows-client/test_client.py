@@ -115,6 +115,23 @@ class ClientTests(unittest.TestCase):
 
         self.assertEqual(sum(map(len, output)), client.SERVER_INPUT_SR)
 
+    def test_pcm_peak_dbfs_handles_silence_and_full_scale(self):
+        self.assertEqual(client.pcm_peak_dbfs(np.zeros(10, dtype=np.int16)), -96.0)
+        self.assertAlmostEqual(
+            client.pcm_peak_dbfs(np.array([-32768], dtype=np.int16)), 0.0
+        )
+
+    def test_audio_levels_reports_and_resets_callback_peaks(self):
+        levels = client.AudioLevels()
+        levels.update_input(np.array([0, 16384], dtype=np.int16))
+        levels.update_output(np.array([8192], dtype=np.int16))
+
+        input_dbfs, output_dbfs = levels.snapshot()
+
+        self.assertAlmostEqual(input_dbfs, -6.02, places=1)
+        self.assertAlmostEqual(output_dbfs, -12.04, places=1)
+        self.assertEqual(levels.snapshot(), (-96.0, -96.0))
+
 
 class FakeInputStream:
     def __init__(self, *args, callback, blocksize, **kwargs):

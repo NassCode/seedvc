@@ -8,6 +8,7 @@ from collections import deque
 import json
 import queue
 import sys
+import threading
 import time
 import uuid
 
@@ -22,6 +23,8 @@ CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
 DEFAULT_CHUNK_MS = 20
 QUEUE_AUDIO_MS = 2_000
+LEVEL_FLOOR_DBFS = -96.0
+LEVEL_REPORT_INTERVAL = 0.1
 
 
 class ClientError(RuntimeError):
@@ -34,6 +37,61 @@ def status(message: str) -> None:
 
 def warning(message: str) -> None:
     print(f"[warning] {message}", file=sys.stderr, flush=True)
+
+
+def pcm_peak_dbfs(samples: np.ndarray) -> float:
+    """Return an int16 PCM peak level with a useful silence floor."""
+    if samples.size == 0:
+        return LEVEL_FLOOR_DBFS
+    peak = int(np.max(np.abs(samples.astype(np.int32))))
+    if peak == 0:
+        return LEVEL_FLOOR_DBFS
+    return max(LEVEL_FLOOR_DBFS, float(20 * np.log10(peak / 32768.0)))
+
+
+class AudioLevels:
+    """Collect callback peaks and publish them outside the real-time threads."""
+
+    def __init__(self) -> None:
+        self._input_peak = 0
+        self._output_peak = 0
+        self._lock = threading.Lock()
+
+    def update_input(self, samples: np.ndarray) -> None:
+        self._update("input", samples)
+
+    def update_output(self, samples: np.ndarray) -> None:
+        self._update("output", samples)
+
+    def _update(self, direction: str, samples: np.ndarray) -> None:
+        if samples.size == 0:
+            return
+        peak = int(np.max(np.abs(samples.astype(np.int32))))
+        with self._lock:
+            if direction == "input":
+                self._input_peak = max(self._input_peak, peak)
+            else:
+                self._output_peak = max(self._output_peak, peak)
+
+    def snapshot(self) -> tuple[float, float]:
+        with self._lock:
+            input_peak, output_peak = self._input_peak, self._output_peak
+            self._input_peak = 0
+            self._output_peak = 0
+        values = np.asarray([input_peak, output_peak], dtype=np.int32)
+        return pcm_peak_dbfs(values[:1]), pcm_peak_dbfs(values[1:])
+
+
+def report_levels(levels: AudioLevels) -> None:
+    input_dbfs, output_dbfs = levels.snapshot()
+    print(
+        "[level] "
+        + json.dumps(
+            {"input_dbfs": round(input_dbfs, 1), "output_dbfs": round(output_dbfs, 1)},
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
 
 
 def device_rows(direction: str | None = None) -> list[dict]:
@@ -286,6 +344,7 @@ def run_local(args: argparse.Namespace, input_device: int, output_device: int) -
     blocksize_in = max(1, round(capture_rate * args.chunk_ms / 1000))
     blocksize_out = max(1, round(output_rate * args.chunk_ms / 1000))
     peak = 0
+    levels = AudioLevels()
 
     def input_callback(indata, frames, time_info, callback_status):
         nonlocal peak
@@ -294,12 +353,14 @@ def run_local(args: argparse.Namespace, input_device: int, output_device: int) -
         converted = resample_chunk(resampler, indata)
         if len(converted):
             peak = max(peak, int(np.max(np.abs(converted.astype(np.int32)))))
+            levels.update_input(converted)
             chunks.put(converted)
 
     def output_callback(outdata, frames, time_info, callback_status):
         if callback_status:
             callback_messages.put(f"output: {callback_status}")
         playback.fill(outdata, frames)
+        levels.update_output(outdata)
 
     status(f"input:  {describe_device(input_device)} at {capture_rate} Hz")
     status(f"output: {describe_device(output_device)} at {output_rate} Hz")
@@ -310,6 +371,7 @@ def run_local(args: argparse.Namespace, input_device: int, output_device: int) -
         status("press Ctrl+C to stop")
 
     started = time.monotonic()
+    next_level_report = started
     try:
         with sd.InputStream(
             device=input_device,
@@ -330,10 +392,14 @@ def run_local(args: argparse.Namespace, input_device: int, output_device: int) -
         ):
             while args.duration is None or time.monotonic() - started < args.duration:
                 try:
-                    message = callback_messages.get(timeout=0.25)
+                    message = callback_messages.get(timeout=LEVEL_REPORT_INTERVAL)
                     warning(message)
                 except queue.Empty:
                     pass
+                now = time.monotonic()
+                if now >= next_level_report:
+                    report_levels(levels)
+                    next_level_report = now + LEVEL_REPORT_INTERVAL
     except sd.PortAudioError as exc:
         raise ClientError(f"could not run local audio streams: {exc}") from exc
 
@@ -368,18 +434,21 @@ async def run_remote(
     blocksize_in = max(1, round(capture_rate * args.chunk_ms / 1000))
     blocksize_out = max(1, round(output_rate * args.chunk_ms / 1000))
     stream_id = f"stream_{uuid.uuid4().hex[:12]}"
+    levels = AudioLevels()
 
     def input_callback(indata, frames, time_info, callback_status):
         if callback_status:
             callback_messages.put(f"input: {callback_status}")
         converted = resample_chunk(input_resampler, indata)
         if len(converted):
+            levels.update_input(converted)
             send_chunks.put(converted.tobytes())
 
     def output_callback(outdata, frames, time_info, callback_status):
         if callback_status:
             callback_messages.put(f"output: {callback_status}")
         playback.fill(outdata, frames)
+        levels.update_output(outdata)
 
     status(f"input:  {describe_device(input_device)} at {capture_rate} Hz")
     status(f"output: {describe_device(output_device)} at {output_rate} Hz")
@@ -450,6 +519,11 @@ async def run_remote(
                         continue
                     warning(message)
 
+            async def report_audio_levels() -> None:
+                while not stop_event.is_set():
+                    report_levels(levels)
+                    await asyncio.sleep(LEVEL_REPORT_INTERVAL)
+
             async def control_stdin() -> None:
                 """Allow a parent GUI to request a protocol-clean shutdown."""
                 while not stop_event.is_set():
@@ -482,6 +556,7 @@ async def run_remote(
                         asyncio.create_task(sender(), name="sender"),
                         asyncio.create_task(receiver(), name="receiver"),
                         asyncio.create_task(report_callback_status(), name="audio-status"),
+                        asyncio.create_task(report_audio_levels(), name="audio-levels"),
                     }
                     if args.control_stdin:
                         tasks.add(asyncio.create_task(control_stdin(), name="controller"))

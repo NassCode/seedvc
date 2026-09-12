@@ -61,8 +61,8 @@ class SeedVCApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("SeedVC Voice Changer")
-        self.root.geometry("850x690")
-        self.root.minsize(760, 620)
+        self.root.geometry("850x780")
+        self.root.minsize(760, 700)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -76,6 +76,8 @@ class SeedVCApp:
         self.input_devices: dict[str, int] = {}
         self.output_devices: dict[str, int] = {}
         self.stored_voices: dict[str, str] = {}
+        self.level_bars: dict[str, ttk.Progressbar] = {}
+        self.level_labels: dict[str, ttk.Label] = {}
 
         try:
             self.settings = load_settings()
@@ -389,6 +391,23 @@ class SeedVCApp:
         self.output_combo.grid(row=row, column=1, sticky="ew", pady=6)
 
         row += 1
+        levels_frame = ttk.LabelFrame(frame, text="Live audio levels", padding=(10, 7))
+        levels_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(7, 5))
+        levels_frame.columnconfigure(1, weight=1)
+        for meter_row, (key, title) in enumerate(
+            (("input", "Microphone input"), ("output", "Converted output to virtual mic"))
+        ):
+            ttk.Label(levels_frame, text=title).grid(
+                row=meter_row, column=0, sticky="w", padx=(0, 10), pady=3
+            )
+            bar = ttk.Progressbar(levels_frame, maximum=96, value=0, mode="determinate")
+            bar.grid(row=meter_row, column=1, sticky="ew", pady=3)
+            label = ttk.Label(levels_frame, text="-96.0 dBFS", width=11, anchor="e")
+            label.grid(row=meter_row, column=2, sticky="e", padx=(10, 0), pady=3)
+            self.level_bars[key] = bar
+            self.level_labels[key] = label
+
+        row += 1
         ttk.Label(frame, text="Reference voice file").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
         ttk.Entry(frame, textvariable=self.reference_file_var, state="readonly").grid(
             row=row, column=1, sticky="ew", pady=6
@@ -587,8 +606,16 @@ class SeedVCApp:
         self.output_devices = {self._device_label(row): int(row["index"]) for row in outputs}
         self.input_combo["values"] = list(self.input_devices)
         self.output_combo["values"] = list(self.output_devices)
-        self._select_device(self.input_combo, self.input_devices, self.settings.input_device, "microphone", "wasapi")
-        self._select_device(self.output_combo, self.output_devices, self.settings.output_device, "cable input", "wasapi")
+        self._select_device(
+            self.input_combo, self.input_devices, self.settings.input_device,
+            self.settings.input_device_name, self.settings.input_hostapi,
+            "microphone", "wasapi",
+        )
+        self._select_device(
+            self.output_combo, self.output_devices, self.settings.output_device,
+            self.settings.output_device_name, self.settings.output_hostapi,
+            "cable input", "wasapi",
+        )
         self._log(f"Found {len(inputs)} input and {len(outputs)} output devices.")
 
     @staticmethod
@@ -596,11 +623,25 @@ class SeedVCApp:
         combo: ttk.Combobox,
         devices: dict[str, int],
         saved: int | None,
+        saved_name: str,
+        saved_api: str,
         preferred_name: str,
         preferred_api: str,
     ) -> None:
         labels = list(devices)
-        selected = next((label for label, index in devices.items() if index == saved), "")
+        selected = ""
+        if saved_name:
+            for label, index in devices.items():
+                try:
+                    device = client.sd.query_devices(index)
+                    hostapi = client.sd.query_hostapis(device["hostapi"])["name"]
+                except Exception:
+                    continue
+                if device["name"] == saved_name and (not saved_api or hostapi == saved_api):
+                    selected = label
+                    break
+        elif saved is not None:
+            selected = next((label for label, index in devices.items() if index == saved), "")
         if not selected:
             selected = next(
                 (
@@ -622,6 +663,10 @@ class SeedVCApp:
 
     def _current_settings(self) -> Settings:
         input_device, output_device = self._selected_devices()
+        input_info = client.sd.query_devices(input_device)
+        output_info = client.sd.query_devices(output_device)
+        input_api = client.sd.query_hostapis(input_info["hostapi"])["name"]
+        output_api = client.sd.query_hostapis(output_info["hostapi"])["name"]
         key_value = self.key_var.get().strip()
         if key_value.casefold().startswith(("ssh ", "ssh.exe ")):
             connection, key_value = parse_ssh_command(key_value)
@@ -642,6 +687,10 @@ class SeedVCApp:
         return Settings(
             input_device=input_device,
             output_device=output_device,
+            input_device_name=str(input_info["name"]),
+            input_hostapi=str(input_api),
+            output_device_name=str(output_info["name"]),
+            output_hostapi=str(output_api),
             pod_id=self.pod_id_var.get().strip(),
             manage_pod=self.manage_var.get(),
             ssh_host=self.host_var.get().strip(),
@@ -1565,6 +1614,16 @@ class SeedVCApp:
             line = raw_line.rstrip()
             if not line:
                 continue
+            if prefix in {"client", "local"} and line.startswith("[level] "):
+                try:
+                    payload = json.loads(line.removeprefix("[level] "))
+                    self._event(
+                        "levels",
+                        (float(payload["input_dbfs"]), float(payload["output_dbfs"])),
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    self._event("log", (f"{prefix}: invalid audio level report", "warning"))
+                continue
             level = "error" if "[error]" in line.casefold() else "warning" if "[warning]" in line.casefold() else "info"
             self._event("log", (f"{prefix}: {line}", level))
             lower = line.casefold()
@@ -1678,6 +1737,9 @@ class SeedVCApp:
                 elif name == "status":
                     key, text, state = value  # type: ignore[misc]
                     self._set_status(key, text, state)
+                elif name == "levels":
+                    input_dbfs, output_dbfs = value  # type: ignore[misc]
+                    self._set_audio_levels(float(input_dbfs), float(output_dbfs))
                 elif name == "connection":
                     host, port, pod_id = value  # type: ignore[misc]
                     self.pod_id_var.set(pod_id)
@@ -1754,6 +1816,8 @@ class SeedVCApp:
                     enabled = bool(value)
                     self.local_button.configure(state="normal" if enabled else "disabled")
                     self.start_button.configure(state="normal" if enabled else "disabled")
+                    if enabled:
+                        self._set_audio_levels(-96.0, -96.0)
         except queue.Empty:
             pass
         if not self.closing:
@@ -1772,9 +1836,16 @@ class SeedVCApp:
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _set_audio_levels(self, input_dbfs: float, output_dbfs: float) -> None:
+        for key, level in (("input", input_dbfs), ("output", output_dbfs)):
+            level = min(0.0, max(-96.0, level))
+            self.level_bars[key].configure(value=level + 96.0)
+            self.level_labels[key].configure(text=f"{level:.1f} dBFS")
+
     def _finish_state(self) -> None:
         self.working = False
         self.client_process = None
+        self._set_audio_levels(-96.0, -96.0)
         self._set_status("voice", "Off", "off")
         if not self.uploading:
             self.start_button.configure(state="normal")
