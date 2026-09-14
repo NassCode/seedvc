@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -1090,9 +1091,23 @@ class SeedVCApp:
         resolved = shutil.which(configured)
         if not resolved and configured.casefold() == "gemini":
             resolved = shutil.which("gemini.cmd") or shutil.which("gemini.ps1")
-        cli = resolved or configured
+        executable = [resolved or configured]
+        if not resolved and configured.casefold() == "gemini" and os.name != "nt":
+            linux_tools = Path(__file__).resolve().parent.parent / "linux-client" / ".tools"
+            node = linux_tools / "node" / "bin" / "node"
+            bundle = (
+                linux_tools
+                / "gemini"
+                / "node_modules"
+                / "@google"
+                / "gemini-cli"
+                / "bundle"
+                / "gemini.js"
+            )
+            if node.is_file() and bundle.is_file():
+                executable = [str(node), str(bundle)]
         return [
-            cli,
+            *executable,
             "--model",
             GEMINI_AUTOPILOT_MODEL,
             "--approval-mode",
@@ -1886,6 +1901,8 @@ class SeedVCApp:
         )
 
     def on_close(self) -> None:
+        if self.closing:
+            return
         self.closing = True
         try:
             settings = self._current_settings()
@@ -1900,9 +1917,18 @@ class SeedVCApp:
             except subprocess.TimeoutExpired:
                 process.terminate()
         self._stop_tunnel()
-        if settings.stop_pod_on_exit and settings.pod_id and self.api_key_var.get().strip():
+        api_key = self.api_key_var.get().strip()
+        if settings.stop_pod_on_exit and api_key:
             try:
-                RunPodAPI(self.api_key_var.get()).stop_pod(settings.pod_id)
+                api = RunPodAPI(api_key)
+                pod_id = settings.pod_id
+                if settings.network_volume_id:
+                    pod = api.preferred_pod_for_network_volume(
+                        settings.network_volume_id
+                    )
+                    pod_id = str(pod.get("id") or "")
+                if pod_id:
+                    api.stop_pod(pod_id)
             except ControllerError:
                 pass
         self.root.destroy()
@@ -1910,8 +1936,17 @@ class SeedVCApp:
 
 def main() -> int:
     root = tk.Tk()
-    SeedVCApp(root)
-    root.mainloop()
+    app = SeedVCApp(root)
+    if os.name != "nt":
+        def request_shutdown(_signum, _frame) -> None:
+            root.after_idle(app.on_close)
+
+        signal.signal(signal.SIGINT, request_shutdown)
+        signal.signal(signal.SIGTERM, request_shutdown)
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        app.on_close()
     return 0
 
 

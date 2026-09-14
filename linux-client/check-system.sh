@@ -34,6 +34,14 @@ else
     missing=1
 fi
 
+if [[ -x "$client_dir/.tools/node/bin/node" ]] \
+    && [[ -x "$client_dir/.tools/gemini/node_modules/.bin/gemini" ]]; then
+    echo "ok:      private Node runtime and Gemini CLI"
+else
+    echo "missing: Gemini CLI (run ./install-gemini.sh)"
+    missing=1
+fi
+
 if command -v pactl >/dev/null 2>&1 \
     && pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -Fxq seedvc_virtual \
     && pactl list short sources 2>/dev/null | awk '{print $2}' | grep -Fxq seedvc_microphone; then

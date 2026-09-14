@@ -9,5 +9,6 @@ if [[ ! -x "$client_dir/.venv/bin/python" ]]; then
 fi
 
 "$client_dir/setup-virtual-mic.sh"
+export PATH="$client_dir/.tools/node/bin:$client_dir/.tools/gemini/node_modules/.bin:$PATH"
 export PULSE_SINK=seedvc_virtual
 exec "$client_dir/.venv/bin/python" "$client_dir/gui.py"

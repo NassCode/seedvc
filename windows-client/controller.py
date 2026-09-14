@@ -60,7 +60,7 @@ class Settings:
     ssh_key: str = ""
     network_volume_id: str = ""
     local_port: int = 8042
-    stop_pod_on_exit: bool = False
+    stop_pod_on_exit: bool = True
     reference_file: str = ""
     active_reference: str = "Saudi Arabic (bundled)"
     gemini_autopilot_enabled: bool = True

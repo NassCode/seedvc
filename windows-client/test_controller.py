@@ -393,6 +393,33 @@ class GuiAutopilotTests(unittest.TestCase):
             StaleWidget(), state="disabled"
         )
 
+    @mock.patch("gui.save_settings")
+    @mock.patch("gui.RunPodAPI")
+    def test_close_stops_current_network_volume_pod(self, runpod_api, save_settings):
+        app = object.__new__(gui.SeedVCApp)
+        app.closing = False
+        app.client_process = None
+        app.api_key_var = mock.Mock(get=mock.Mock(return_value="secret"))
+        app.root = mock.Mock()
+        app.stop_voice = mock.Mock()
+        app._stop_tunnel = mock.Mock()
+        app._current_settings = mock.Mock(
+            return_value=controller.Settings(
+                pod_id="stale-pod",
+                network_volume_id="volume-1",
+                stop_pod_on_exit=True,
+            )
+        )
+        api = runpod_api.return_value
+        api.preferred_pod_for_network_volume.return_value = {"id": "current-pod"}
+
+        app.on_close()
+        app.on_close()
+
+        api.preferred_pod_for_network_volume.assert_called_once_with("volume-1")
+        api.stop_pod.assert_called_once_with("current-pod")
+        app.root.destroy.assert_called_once_with()
+
     def test_autopilot_triggers_on_capacity_failure(self):
         app = object.__new__(gui.SeedVCApp)
         settings = controller.Settings(gemini_autopilot_enabled=True)

@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+linux-client/.tools/
 venv/
 .env
 *.log

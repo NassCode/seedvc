@@ -16,8 +16,9 @@ chmod +x ./*.sh
 The setup is idempotent. It installs Python venv/Tk, PortAudio, PipeWire Pulse
 utilities, OpenSSH, and Secret Service support; creates `.venv`; installs the
 Python requirements; and creates the `SeedVC_Virtual_Microphone` PipeWire sink
-and browser-visible `SeedVC_Microphone` input source. `sudo` is used only for
-missing Ubuntu packages.
+and browser-visible `SeedVC_Microphone` input source. It also installs a private
+Node runtime and the official Gemini CLI for RunPod recovery. `sudo` is used
+only for missing Ubuntu packages.
 
 Start the controller with:
 

@@ -43,6 +43,7 @@ fi
 python3 -m venv "$client_dir/.venv"
 "$client_dir/.venv/bin/python" -m pip install --upgrade pip
 "$client_dir/.venv/bin/python" -m pip install -r "$client_dir/requirements.txt"
+"$client_dir/install-gemini.sh"
 
 systemctl --user start pipewire pipewire-pulse
 "$client_dir/setup-virtual-mic.sh"
