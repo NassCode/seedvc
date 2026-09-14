@@ -1,4 +1,4 @@
-"""Tkinter control panel for the SeedVC Windows client and RunPod tunnel."""
+"""Tkinter control panel for the SeedVC desktop client and RunPod tunnel."""
 
 from __future__ import annotations
 
@@ -15,6 +15,19 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import client
+from platform_support import (
+    CREDENTIAL_STORE_NAME,
+    MONO_FONT,
+    PLATFORM_NAME,
+    PREFERRED_AUDIO_API,
+    PREFERRED_INPUT_API,
+    PREFERRED_INPUT_NAME,
+    PREFERRED_OUTPUT_NAME,
+    ROUTE_DESCRIPTION,
+    UI_FONT,
+    VIRTUAL_MIC_NAME,
+    VIRTUAL_OUTPUT_LABEL,
+)
 from controller import (
     ControllerError,
     REMOTE_LIST_REFERENCES_COMMAND,
@@ -118,11 +131,11 @@ class SeedVCApp:
         style = ttk.Style(self.root)
         if "vista" in style.theme_names():
             style.theme_use("vista")
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 18))
+        style.configure("Title.TLabel", font=(UI_FONT, 18, "bold"))
         style.configure("Subtitle.TLabel", foreground="#555555")
-        style.configure("Status.TLabel", font=("Segoe UI Semibold", 10))
-        style.configure("Section.TLabel", font=("Segoe UI Semibold", 11))
-        style.configure("Start.TButton", font=("Segoe UI Semibold", 12), padding=(24, 12))
+        style.configure("Status.TLabel", font=(UI_FONT, 10, "bold"))
+        style.configure("Section.TLabel", font=(UI_FONT, 11, "bold"))
+        style.configure("Start.TButton", font=(UI_FONT, 12, "bold"), padding=(24, 12))
         style.configure("Stop.TButton", padding=(14, 9))
 
     def _build_ui(self) -> None:
@@ -132,7 +145,7 @@ class SeedVCApp:
         ttk.Label(outer, text="SeedVC Voice Changer", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             outer,
-            text="Microphone → RunPod Seed-VC → VB-CABLE",
+            text=ROUTE_DESCRIPTION,
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(0, 14))
 
@@ -178,14 +191,14 @@ class SeedVCApp:
 
         log_header = ttk.Frame(outer)
         log_header.pack(fill="x")
-        ttk.Label(log_header, text="Activity log", font=("Segoe UI Semibold", 10)).pack(side="left")
+        ttk.Label(log_header, text="Activity log", font=(UI_FONT, 10, "bold")).pack(side="left")
         ttk.Button(log_header, text="Clear", command=lambda: self.log.delete("1.0", "end")).pack(side="right")
         self.log = scrolledtext.ScrolledText(
             outer,
             height=13,
             wrap="word",
             state="disabled",
-            font=("Cascadia Mono", 9),
+            font=(MONO_FONT, 9),
             background="#111827",
             foreground="#e5e7eb",
             insertbackground="#ffffff",
@@ -198,7 +211,7 @@ class SeedVCApp:
         ttk.Label(frame, text="Physical microphone").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=6)
         self.input_combo = ttk.Combobox(frame, state="readonly")
         self.input_combo.grid(row=0, column=1, sticky="ew", pady=6)
-        ttk.Label(frame, text="VB-CABLE playback").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(frame, text=VIRTUAL_OUTPUT_LABEL).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=6)
         self.output_combo = ttk.Combobox(frame, state="readonly")
         self.output_combo.grid(row=1, column=1, sticky="ew", pady=6)
         ttk.Button(frame, text="Refresh devices", command=self.refresh_devices).grid(
@@ -248,7 +261,7 @@ class SeedVCApp:
         ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(7, 0))
         ttk.Label(
             frame,
-            text="Your calling app should use CABLE Output as its microphone.",
+            text=f"Your calling app should use {VIRTUAL_MIC_NAME} as its microphone.",
             style="Subtitle.TLabel",
         ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
@@ -294,7 +307,7 @@ class SeedVCApp:
 
         ttk.Label(
             frame,
-            text="The API key is stored in Windows Credential Manager, never in settings.json.",
+            text=f"The API key is stored in {CREDENTIAL_STORE_NAME}, never in settings.json.",
             style="Subtitle.TLabel",
         ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(7, 0))
         ttk.Checkbutton(
@@ -314,7 +327,7 @@ class SeedVCApp:
         ttk.Label(title_block, text="SeedVC Voice Changer", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             title_block,
-            text="Mic to RunPod Seed-VC to VB-CABLE",
+            text=ROUTE_DESCRIPTION,
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(0, 14))
         ttk.Button(header, text="Advanced Settings", command=self.open_settings).pack(
@@ -360,14 +373,14 @@ class SeedVCApp:
 
         log_header = ttk.Frame(outer)
         log_header.pack(fill="x")
-        ttk.Label(log_header, text="Activity log", font=("Segoe UI Semibold", 10)).pack(side="left")
+        ttk.Label(log_header, text="Activity log", font=(UI_FONT, 10, "bold")).pack(side="left")
         ttk.Button(log_header, text="Clear", command=lambda: self.log.delete("1.0", "end")).pack(side="right")
         self.log = scrolledtext.ScrolledText(
             outer,
             height=13,
             wrap="word",
             state="disabled",
-            font=("Cascadia Mono", 9),
+            font=(MONO_FONT, 9),
             background="#111827",
             foreground="#e5e7eb",
             insertbackground="#ffffff",
@@ -386,7 +399,7 @@ class SeedVCApp:
         )
 
         row += 1
-        ttk.Label(frame, text="VB-CABLE playback").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(frame, text=VIRTUAL_OUTPUT_LABEL).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
         self.output_combo = ttk.Combobox(frame, state="readonly")
         self.output_combo.grid(row=row, column=1, sticky="ew", pady=6)
 
@@ -446,7 +459,7 @@ class SeedVCApp:
         row += 1
         ttk.Label(
             frame,
-            text="Use clear speech of at least 5 seconds. Your calling app should use CABLE Output as its microphone.",
+            text=f"Use clear speech of at least 5 seconds. Your calling app should use {VIRTUAL_MIC_NAME} as its microphone.",
             style="Subtitle.TLabel",
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(7, 0))
 
@@ -518,7 +531,7 @@ class SeedVCApp:
 
         ttk.Label(
             frame,
-            text="Secrets are stored in Windows Credential Manager. Logs are summarized and redacted.",
+            text=f"Secrets are stored in {CREDENTIAL_STORE_NAME}. Logs are summarized and redacted.",
             style="Subtitle.TLabel",
         ).grid(row=14, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
@@ -609,12 +622,12 @@ class SeedVCApp:
         self._select_device(
             self.input_combo, self.input_devices, self.settings.input_device,
             self.settings.input_device_name, self.settings.input_hostapi,
-            "microphone", "wasapi",
+            PREFERRED_INPUT_NAME, PREFERRED_INPUT_API,
         )
         self._select_device(
             self.output_combo, self.output_devices, self.settings.output_device,
             self.settings.output_device_name, self.settings.output_hostapi,
-            "cable input", "wasapi",
+            PREFERRED_OUTPUT_NAME, PREFERRED_AUDIO_API,
         )
         self._log(f"Found {len(inputs)} input and {len(outputs)} output devices.")
 
@@ -819,7 +832,9 @@ class SeedVCApp:
             "but files under /workspace will remain.",
         ):
             return
-        self.configure_ssh_button.configure(state="disabled")
+        self._configure_widget_if_alive(
+            getattr(self, "configure_ssh_button", None), state="disabled"
+        )
         self._set_status("pod", "Configuring SSH", "busy")
 
         def worker() -> None:
@@ -1035,11 +1050,11 @@ class SeedVCApp:
                 bufsize=1,
                 creationflags=CLIENT_CREATE_FLAGS,
             )
-            self._event("log", ("Windows audio client started.", "info"))
+            self._event("log", (f"{PLATFORM_NAME} audio client started.", "info"))
             self._read_process(self.client_process, "client")
             code = self.client_process.wait()
             if code not in (0, 130) and not self.closing:
-                raise ControllerError(f"Windows audio client exited with code {code}")
+                raise ControllerError(f"{PLATFORM_NAME} audio client exited with code {code}")
         except subprocess.TimeoutExpired as exc:
             self._event("error", f"Timed out while starting the pod service: {exc}")
         except ControllerError as exc:
@@ -1727,6 +1742,18 @@ class SeedVCApp:
     def _event(self, name: str, value: object) -> None:
         self.events.put((name, value))
 
+    @staticmethod
+    def _configure_widget_if_alive(widget: object | None, **options: object) -> None:
+        """Configure a Tk widget unless its owning transient window was closed."""
+        if widget is None:
+            return
+        try:
+            if widget.winfo_exists():  # type: ignore[attr-defined]
+                widget.configure(**options)  # type: ignore[attr-defined]
+        except tk.TclError:
+            # Tk can destroy a transient between winfo_exists and configure.
+            pass
+
     def _drain_events(self) -> None:
         try:
             while True:
@@ -1810,8 +1837,7 @@ class SeedVCApp:
                     self.refresh_voices_button.configure(state="normal")
                 elif name == "configure_ssh_finished":
                     button = getattr(self, "configure_ssh_button", None)
-                    if button is not None and button.winfo_exists():
-                        button.configure(state="normal")
+                    self._configure_widget_if_alive(button, state="normal")
                 elif name == "buttons":
                     enabled = bool(value)
                     self.local_button.configure(state="normal" if enabled else "disabled")

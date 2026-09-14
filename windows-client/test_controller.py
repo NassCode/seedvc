@@ -381,6 +381,18 @@ class AutopilotPolicyTests(unittest.TestCase):
 
 
 class GuiAutopilotTests(unittest.TestCase):
+    def test_stale_settings_widget_does_not_abort_callback(self):
+        class StaleWidget:
+            def winfo_exists(self):
+                return True
+
+            def configure(self, **options):
+                raise gui.tk.TclError("invalid command name")
+
+        gui.SeedVCApp._configure_widget_if_alive(
+            StaleWidget(), state="disabled"
+        )
+
     def test_autopilot_triggers_on_capacity_failure(self):
         app = object.__new__(gui.SeedVCApp)
         settings = controller.Settings(gemini_autopilot_enabled=True)

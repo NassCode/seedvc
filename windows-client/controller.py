@@ -14,6 +14,8 @@ import re
 from typing import Callable
 from urllib import error, request
 
+from platform_support import CREDENTIAL_STORE_NAME, PLATFORM_NAME
+
 
 APP_NAME = "SeedVC"
 CREDENTIAL_SERVICE = "SeedVC RunPod"
@@ -118,7 +120,7 @@ def get_api_key() -> str:
 
         return keyring.get_password(CREDENTIAL_SERVICE, CREDENTIAL_USERNAME) or ""
     except Exception as exc:  # platform credential backends vary
-        raise ControllerError(f"could not read Windows Credential Manager: {exc}") from exc
+        raise ControllerError(f"could not read {CREDENTIAL_STORE_NAME}: {exc}") from exc
 
 
 def set_api_key(api_key: str) -> None:
@@ -129,7 +131,7 @@ def set_api_key(api_key: str) -> None:
 
         keyring.set_password(CREDENTIAL_SERVICE, CREDENTIAL_USERNAME, api_key.strip())
     except Exception as exc:
-        raise ControllerError(f"could not save to Windows Credential Manager: {exc}") from exc
+        raise ControllerError(f"could not save to {CREDENTIAL_STORE_NAME}: {exc}") from exc
 
 
 def get_gemini_api_key() -> str:
@@ -138,7 +140,7 @@ def get_gemini_api_key() -> str:
 
         return keyring.get_password(GEMINI_CREDENTIAL_SERVICE, GEMINI_CREDENTIAL_USERNAME) or ""
     except Exception as exc:  # platform credential backends vary
-        raise ControllerError(f"could not read Windows Credential Manager: {exc}") from exc
+        raise ControllerError(f"could not read {CREDENTIAL_STORE_NAME}: {exc}") from exc
 
 
 def set_gemini_api_key(api_key: str) -> None:
@@ -151,7 +153,7 @@ def set_gemini_api_key(api_key: str) -> None:
             GEMINI_CREDENTIAL_SERVICE, GEMINI_CREDENTIAL_USERNAME, api_key.strip()
         )
     except Exception as exc:
-        raise ControllerError(f"could not save to Windows Credential Manager: {exc}") from exc
+        raise ControllerError(f"could not save to {CREDENTIAL_STORE_NAME}: {exc}") from exc
 
 
 def redact_secrets(text: str, *secrets: str) -> str:
@@ -235,7 +237,7 @@ class RunPodAPI:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 SeedVC-Windows-Client/1.0",
+            "User-Agent": f"Mozilla/5.0 SeedVC-{PLATFORM_NAME}-Client/1.0",
         }
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -277,7 +279,7 @@ class RunPodAPI:
                 "Authorization": f"Bearer {self.api_key}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 SeedVC-Windows-Client/1.0",
+                "User-Agent": f"Mozilla/5.0 SeedVC-{PLATFORM_NAME}-Client/1.0",
             },
             data=body,
         )

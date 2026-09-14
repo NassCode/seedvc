@@ -1,4 +1,4 @@
-"""Low-latency Windows audio client for Fast-VC-Service."""
+"""Low-latency desktop audio client for Fast-VC-Service."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ import sounddevice as sd
 import soxr
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidURI, WebSocketException
+
+from platform_support import PLATFORM_NAME, VIRTUAL_OUTPUT_LABEL, is_virtual_output_name
 
 SERVER_INPUT_SR = 16_000
 CHANNELS = 1
@@ -411,8 +413,8 @@ def run_local(args: argparse.Namespace, input_device: int, output_device: int) -
     )
     if level_dbfs < -60:
         warning(
-            "microphone signal was effectively silent; check Windows microphone "
-            "privacy, mute, level, and the selected input device"
+            f"microphone signal was effectively silent; check {PLATFORM_NAME} microphone "
+            "permissions, mute, level, and the selected input device"
         )
 
 
@@ -613,7 +615,7 @@ def positive_int(value: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Windows microphone client for Fast-VC-Service"
+        description=f"{PLATFORM_NAME} microphone client for Fast-VC-Service"
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -667,12 +669,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.list_devices:
         print_devices()
-        cable_present = any(
-            "cable input" in device["name"].casefold()
+        virtual_output_present = any(
+            is_virtual_output_name(device["name"])
             for device in device_rows("output")
         )
-        if not cable_present:
-            warning("CABLE Input (VB-Audio Virtual Cable) is not currently installed or visible")
+        if not virtual_output_present:
+            warning(f"{VIRTUAL_OUTPUT_LABEL} is not currently installed or visible")
         return 0
 
     try:
